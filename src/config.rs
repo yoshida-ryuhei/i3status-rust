@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
-use serde::de::{Deserialize, Deserializer, Error};
-use serde_derive::Deserialize;
+use serde::de::{Deserializer, Error};
+use serde::Deserialize;
 use toml::value;
 
 use crate::blocks::BlockType;
@@ -13,19 +13,17 @@ use crate::themes::Theme;
 
 #[derive(Debug)]
 pub struct SharedConfig {
-    pub theme: Rc<Theme>,
-    icons: Rc<Icons>,
+    pub theme: Arc<Theme>,
+    icons: Arc<Icons>,
     icons_format: String,
-    pub scrolling: Scrolling,
 }
 
 impl SharedConfig {
     pub fn new(config: &Config) -> Self {
         Self {
-            theme: Rc::new(config.theme.clone()),
-            icons: Rc::new(config.icons.clone()),
+            theme: Arc::new(config.theme.clone()),
+            icons: Arc::new(config.icons.clone()),
             icons_format: config.icons_format.clone(),
-            scrolling: config.scrolling,
         }
     }
 
@@ -36,14 +34,14 @@ impl SharedConfig {
     pub fn theme_override(&mut self, overrides: &HashMap<String, String>) -> Result<()> {
         let mut theme = self.theme.as_ref().clone();
         theme.apply_overrides(overrides)?;
-        self.theme = Rc::new(theme);
+        self.theme = Arc::new(theme);
         Ok(())
     }
 
     pub fn icons_override(&mut self, overrides: HashMap<String, String>) {
         let mut icons = self.icons.as_ref().clone();
         icons.0.extend(overrides);
-        self.icons = Rc::new(icons);
+        self.icons = Arc::new(icons);
     }
 
     pub fn get_icon(&self, icon: &str) -> Result<String> {
@@ -60,10 +58,9 @@ impl SharedConfig {
 impl Default for SharedConfig {
     fn default() -> Self {
         Self {
-            theme: Rc::new(Theme::default()),
-            icons: Rc::new(Icons::default()),
+            theme: Arc::new(Theme::default()),
+            icons: Arc::new(Icons::default()),
             icons_format: " {icon} ".to_string(),
-            scrolling: Scrolling::default(),
         }
     }
 }
@@ -71,10 +68,9 @@ impl Default for SharedConfig {
 impl Clone for SharedConfig {
     fn clone(&self) -> Self {
         Self {
-            theme: Rc::clone(&self.theme),
-            icons: Rc::clone(&self.icons),
+            theme: Arc::clone(&self.theme),
+            icons: Arc::clone(&self.icons),
             icons_format: self.icons_format.clone(),
-            scrolling: self.scrolling,
         }
     }
 }
@@ -120,7 +116,7 @@ impl Default for Config {
     }
 }
 
-#[derive(Deserialize, Copy, Clone, Debug)]
+#[derive(Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Scrolling {
     Reverse,

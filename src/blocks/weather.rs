@@ -14,7 +14,7 @@ use crate::formatting::FormatTemplate;
 use crate::http;
 use crate::protocol::i3bar_event::{I3BarEvent, MouseButton};
 use crate::scheduler::Task;
-use crate::widgets::{text::TextWidget, I3BarWidget, State};
+use crate::widgets::*;
 
 const OPENWEATHERMAP_API_KEY_ENV: &str = "OPENWEATHERMAP_API_KEY";
 const OPENWEATHERMAP_CITY_ID_ENV: &str = "OPENWEATHERMAP_CITY_ID";
@@ -74,11 +74,8 @@ fn malformed_json_error() -> Error {
 
 // TODO: might be good to allow for different geolocation services to be used, similar to how we have `service` for the weather API
 fn find_ip_location() -> Result<Option<String>> {
-    let http_call_result = http::http_get_json(
-        "https://ipapi.co/json/",
-        Some(Duration::from_secs(3)),
-        vec![],
-    )?;
+    let http_call_result =
+        http::http_get_json("https://ipapi.co/json/", Some(Duration::from_secs(3)), &[])?;
 
     let city = http_call_result
         .content
@@ -202,7 +199,7 @@ impl Weather {
                 );
 
                 let output =
-                    http::http_get_json(openweather_url, Some(Duration::from_secs(3)), vec![])?;
+                    http::http_get_json(openweather_url, Some(Duration::from_secs(3)), &[])?;
 
                 // All 300-399 and >500 http codes should be considered as temporary error,
                 // and not result in block error, i.e. leave the output empty.
@@ -362,8 +359,8 @@ impl Block for Weather {
         Ok(Some(self.update_interval.into()))
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.weather]
+    fn view(&self) -> Vec<Widget> {
+        vec![self.weather.clone().into()]
     }
 
     fn click(&mut self, event: &I3BarEvent) -> Result<()> {

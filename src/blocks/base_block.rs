@@ -1,6 +1,6 @@
 //! A Base block for common behavior for all blocks
 
-use serde_derive::Deserialize;
+use serde::Deserialize;
 use std::collections::HashMap;
 use toml::{value::Table, Value};
 

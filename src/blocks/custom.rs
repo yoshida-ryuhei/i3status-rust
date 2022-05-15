@@ -13,8 +13,8 @@ use crate::protocol::i3bar_event::I3BarEvent;
 use crate::scheduler::Task;
 use crate::subprocess::spawn_child_async;
 use crate::util::expand_string;
-use crate::widgets::text::TextWidget;
-use crate::widgets::{I3BarWidget, State};
+use crate::widgets::*;
+
 use crossbeam_channel::Sender;
 use inotify::{EventMask, Inotify, WatchMask};
 use serde_derive::Deserialize;
@@ -205,11 +205,11 @@ impl Block for Custom {
         Ok(Some(self.update_interval.clone()))
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
+    fn view(&self) -> Vec<Widget> {
         if self.is_empty && self.hide_when_empty {
             vec![]
         } else {
-            vec![&self.output]
+            vec![self.output.clone().into()]
         }
     }
 

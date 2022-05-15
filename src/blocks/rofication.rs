@@ -19,9 +19,7 @@ use crate::protocol::i3bar_event::MouseButton;
 use crate::scheduler::Task;
 use crate::subprocess::spawn_child_async;
 use crate::util::expand_string;
-use crate::widgets::text::TextWidget;
-use crate::widgets::I3BarWidget;
-use crate::widgets::State;
+use crate::widgets::*;
 
 #[derive(Debug)]
 struct RotificationStatus {
@@ -117,8 +115,8 @@ impl Block for Rofication {
         Ok(Some(self.update_interval.into()))
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.text]
+    fn view(&self) -> Vec<Widget> {
+        vec![self.text.clone().into()]
     }
 
     fn click(&mut self, event: &I3BarEvent) -> Result<()> {

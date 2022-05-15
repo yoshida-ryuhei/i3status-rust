@@ -14,8 +14,7 @@ use crate::formatting::FormatTemplate;
 use crate::protocol::i3bar_event::{I3BarEvent, MouseButton};
 use crate::scheduler::Task;
 use crate::util::expand_string;
-use crate::widgets::text::TextWidget;
-use crate::widgets::{I3BarWidget, State};
+use crate::widgets::*;
 use inotify::{EventMask, Inotify, WatchMask};
 
 pub struct Taskwarrior {
@@ -243,8 +242,8 @@ impl Block for Taskwarrior {
         Ok(Some(self.update_interval.into()))
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.output]
+    fn view(&self) -> Vec<Widget> {
+        vec![self.output.clone().into()]
     }
 
     fn click(&mut self, event: &I3BarEvent) -> Result<()> {

@@ -25,8 +25,7 @@ use crate::formatting::value::Value;
 use crate::formatting::FormatTemplate;
 use crate::scheduler::Task;
 use crate::util::{self, battery_level_to_icon, read_file};
-use crate::widgets::text::TextWidget;
-use crate::widgets::{I3BarWidget, State};
+use crate::widgets::*;
 
 /// A battery device can be queried for a few properties relevant to the user.
 pub trait BatteryDevice {
@@ -912,12 +911,12 @@ impl Block for Battery {
         }
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
+    fn view(&self) -> Vec<Widget> {
         // Don't display the block at all, if it's configured to be hidden on missing batteries
         if !self.device.is_available() && self.hide_missing {
             return Vec::new();
         }
 
-        vec![&self.output]
+        vec![self.output.clone().into()]
     }
 }

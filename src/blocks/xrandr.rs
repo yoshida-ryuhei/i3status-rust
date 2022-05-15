@@ -15,8 +15,7 @@ use crate::formatting::FormatTemplate;
 use crate::protocol::i3bar_event::{I3BarEvent, MouseButton};
 use crate::scheduler::Task;
 use crate::subprocess::spawn_child_async;
-use crate::widgets::text::TextWidget;
-use crate::widgets::I3BarWidget;
+use crate::widgets::*;
 
 struct Monitor {
     name: String,
@@ -105,10 +104,10 @@ impl Xrandr {
             Command::new("xrandr")
                 .args(&["--listactivemonitors"])
                 .output()
-                .error_msg( "couldn't collect active xrandr monitors")?
+                .error_msg("couldn't collect active xrandr monitors")?
                 .stdout,
         )
-        .error_msg( "couldn't parse xrandr monitor list")?;
+        .error_msg("couldn't parse xrandr monitor list")?;
 
         let monitors: Vec<&str> = active_monitors_cli.split('\n').collect();
         let mut active_monitors: Vec<String> = Vec::new();
@@ -134,10 +133,10 @@ impl Xrandr {
             Command::new("xrandr")
                 .args(&["--verbose"])
                 .output()
-                .error_msg( "couldn't collect xrandr monitor info")?
+                .error_msg("couldn't collect xrandr monitor info")?
                 .stdout,
         )
-        .error_msg( "couldn't parse xrandr monitor info")?;
+        .error_msg("couldn't parse xrandr monitor info")?;
 
         let regex_set = RegexSet::new(
             monitor_names
@@ -145,7 +144,7 @@ impl Xrandr {
                 .map(|x| format!("{} connected", x))
                 .chain(std::iter::once("Brightness:".to_string())),
         )
-        .error_msg( "invalid monitor name")?;
+        .error_msg("invalid monitor name")?;
 
         let monitor_infos: Vec<&str> = monitor_info_cli
             .split('\n')
@@ -161,7 +160,7 @@ impl Xrandr {
                 display = name.trim();
                 if let Some(brightness_raw) = b_line.split(':').collect::<Vec<&str>>().get(1) {
                     brightness = (f32::from_str(brightness_raw.trim())
-                        .error_msg( "unable to parse brightness")?
+                        .error_msg("unable to parse brightness")?
                         * 100.0)
                         .floor() as u32;
                 }
@@ -253,8 +252,8 @@ impl Block for Xrandr {
         Ok(Some(self.update_interval.into()))
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.text]
+    fn view(&self) -> Vec<Widget> {
+        vec![self.text.clone().into()]
     }
 
     fn click(&mut self, e: &I3BarEvent) -> Result<()> {

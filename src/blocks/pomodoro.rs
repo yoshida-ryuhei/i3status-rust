@@ -10,8 +10,7 @@ use crate::errors::*;
 use crate::protocol::i3bar_event::{I3BarEvent, MouseButton};
 use crate::scheduler::Task;
 use crate::subprocess::spawn_child_async;
-use crate::widgets::text::TextWidget;
-use crate::widgets::I3BarWidget;
+use crate::widgets::*;
 
 #[derive(Clone, Copy)]
 enum State {
@@ -229,7 +228,7 @@ impl Block for Pomodoro {
         self.set_text()
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.time]
+    fn view(&self) -> Vec<Widget> {
+        vec![self.time.clone().into()]
     }
 }

@@ -131,7 +131,7 @@ where
     toml::from_str(&contents).error_msg("failed to parse TOML from file contents")
 }
 
-pub fn read_file(path: impl AsRef<Path>) -> Result<String> {
+pub fn read_file_sync(path: impl AsRef<Path>) -> Result<String> {
     let mut f = OpenOptions::new()
         .read(true)
         .open(path.as_ref())
@@ -142,6 +142,21 @@ pub fn read_file(path: impl AsRef<Path>) -> Result<String> {
     // Removes trailing newline
     content.pop();
     Ok(content)
+}
+
+pub async fn read_file(path: impl AsRef<Path>) -> std::io::Result<String> {
+    use tokio::io::AsyncReadExt;
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut content = String::new();
+    file.read_to_string(&mut content).await?;
+    Ok(content.trim_end().to_string())
+}
+
+macro_rules! regex {
+    ($re:literal $(,)?) => {{
+        static RE: once_cell::sync::OnceCell<regex::Regex> = once_cell::sync::OnceCell::new();
+        RE.get_or_init(|| regex::Regex::new($re).unwrap())
+    }};
 }
 
 pub fn has_command(command: &str) -> Result<bool> {
@@ -189,15 +204,21 @@ pub fn country_flag_from_iso_code(country_code: &str) -> String {
     String::from_utf8(vec![0xf0, 0x9f, 0x87, b1, 0xf0, 0x9f, 0x87, b2]).unwrap()
 }
 
-pub fn notify(short: &str, long: &str) {
-    let _ = Command::new("notify-send").args([short, long]).output();
+pub async fn new_dbus_connection() -> Result<zbus::Connection> {
+    zbus::Connection::session()
+        .await
+        .error_msg("Failed to open DBus session connection")
 }
 
-pub fn expand_string(s: &str) -> Result<String> {
-    shellexpand::full(s)
-        .error_msg("Failed to expand string")
-        .map(Into::into)
+pub async fn new_system_dbus_connection() -> Result<zbus::Connection> {
+    zbus::Connection::system()
+        .await
+        .error_msg("Failed to open DBus system connection")
 }
+
+// pub fn notify(short: &str, long: &str) {
+//     let _ = Command::new("notify-send").args([short, long]).output();
+// }
 
 #[cfg(test)]
 mod tests {

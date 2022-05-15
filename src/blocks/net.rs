@@ -21,7 +21,7 @@ use crate::formatting::FormatTemplate;
 use crate::protocol::i3bar_event::{I3BarEvent, MouseButton};
 use crate::scheduler::Task;
 use crate::util::escape_pango_text;
-use crate::widgets::{text::TextWidget, I3BarWidget, Spacing};
+use crate::widgets::*;
 
 lazy_static! {
     static ref DEFAULT_DEV_REGEX: Regex = Regex::new("default.*dev (\\w*).*").unwrap();
@@ -655,11 +655,11 @@ impl Block for Net {
         Ok(Some(self.update_interval.into()))
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
+    fn view(&self) -> Vec<Widget> {
         if (!self.active && self.hide_inactive) || (!self.exists && self.hide_missing) {
             vec![]
         } else {
-            vec![&self.output]
+            vec![self.output.clone().into()]
         }
     }
 

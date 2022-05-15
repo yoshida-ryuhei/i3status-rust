@@ -1,19 +1,5 @@
-use std::fs::{read_to_string, OpenOptions};
-use std::io::prelude::*;
-use std::time::Duration;
-
-use crossbeam_channel::Sender;
-use serde_derive::Deserialize;
-
-use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::SharedConfig;
-use crate::de::deserialize_duration;
-use crate::errors::*;
-use crate::formatting::value::Value;
-use crate::formatting::FormatTemplate;
-use crate::scheduler::Task;
-use crate::widgets::text::TextWidget;
-use crate::widgets::{I3BarWidget, State};
+use super::prelude::*;
+use tokio::fs::read_to_string;
 
 pub struct Load {
     text: TextWidget,
@@ -25,43 +11,29 @@ pub struct Load {
     minimum_critical: f64,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, SmartDefault)]
 #[serde(deny_unknown_fields, default)]
 pub struct LoadConfig {
-    pub format: FormatTemplate,
-    #[serde(deserialize_with = "deserialize_duration")]
-    pub interval: Duration,
-
-    /// Minimum load, where state is set to info
-    pub info: f64,
-
-    /// Minimum load, where state is set to warning
-    pub warning: f64,
-
-    /// Minimum load, where state is set to critical
-    pub critical: f64,
+    format: FormatTemplate,
+    #[default(5.into())]
+    interval: Seconds,
+    #[default(0.3)]
+    info: f64,
+    #[default(0.6)]
+    warning: f64,
+    #[default(0.9)]
+    critical: f64,
 }
 
-impl Default for LoadConfig {
-    fn default() -> Self {
-        Self {
-            format: FormatTemplate::default(),
-            interval: Duration::from_secs(5),
-            info: 0.3,
-            warning: 0.6,
-            critical: 0.9,
-        }
-    }
-}
-
+#[async_trait]
 impl ConfigBlock for Load {
     type Config = LoadConfig;
 
-    fn new(
+    async fn new(
         id: usize,
-        block_config: Self::Config,
+        config: Self::Config,
         shared_config: SharedConfig,
-        _tx_update_request: Sender<Task>,
+        _: Sender<usize>,
     ) -> Result<Self> {
         let text = TextWidget::new(id, 0, shared_config)
             .with_icon("cogs")?
@@ -69,6 +41,7 @@ impl ConfigBlock for Load {
 
         // borrowed from https://docs.rs/cpuinfo/0.1.1/src/cpuinfo/count/logical.rs.html#4-6
         let content = read_to_string("/proc/cpuinfo")
+            .await
             .error_msg("Your system doesn't support /proc/cpuinfo")?;
         let logical_cores = content
             .lines()
@@ -77,31 +50,26 @@ impl ConfigBlock for Load {
 
         Ok(Load {
             logical_cores,
-            update_interval: block_config.interval,
-            minimum_info: block_config.info,
-            minimum_warning: block_config.warning,
-            minimum_critical: block_config.critical,
-            format: block_config.format.with_default("{1m}")?,
+            update_interval: config.interval.0,
+            minimum_info: config.info,
+            minimum_warning: config.warning,
+            minimum_critical: config.critical,
+            format: config.format.with_default("{1m}")?,
             text,
         })
     }
 }
 
+#[async_trait]
 impl Block for Load {
-    fn name(&self) -> &'static str {
-        "load"
+    fn interval(&self) -> Option<Duration> {
+        Some(self.update_interval)
     }
 
-    fn update(&mut self) -> Result<Option<Update>> {
-        let mut f = OpenOptions::new()
-            .read(true)
-            .open("/proc/loadavg")
-            .error_msg(
-                "Your system does not support reading the load average from /proc/loadavg",
-            )?;
-        let mut loadavg = String::new();
-        f.read_to_string(&mut loadavg)
-            .error_msg("Failed to read the load average of your system!")?;
+    async fn update(&mut self) -> Result<()> {
+        let loadavg = read_to_string("/proc/loadavg").await.error_msg(
+            "Your system does not support reading the load average from /proc/loadavg",
+        )?;
 
         let split: Vec<f64> = loadavg
             .split(' ')
@@ -126,7 +94,7 @@ impl Block for Load {
 
         self.text.set_texts(self.format.render(&values)?);
 
-        Ok(Some(self.update_interval.into()))
+        Ok(())
     }
 
     fn view(&self) -> Vec<&dyn I3BarWidget> {

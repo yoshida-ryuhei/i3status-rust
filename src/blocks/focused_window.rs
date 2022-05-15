@@ -13,8 +13,7 @@ use crate::formatting::value::Value;
 use crate::formatting::FormatTemplate;
 use crate::scheduler::Task;
 use crate::util::escape_pango_text;
-use crate::widgets::text::TextWidget;
-use crate::widgets::I3BarWidget;
+use crate::widgets::*;
 
 #[derive(Copy, Clone, Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -224,7 +223,7 @@ impl Block for FocusedWindow {
         Ok(None)
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
+    fn view(&self) -> Vec<Widget> {
         let title = &*self
             .title
             .lock()
@@ -233,7 +232,7 @@ impl Block for FocusedWindow {
         if title.is_empty() {
             vec![]
         } else {
-            vec![&self.text]
+            vec![self.text.clone().into()]
         }
     }
 }

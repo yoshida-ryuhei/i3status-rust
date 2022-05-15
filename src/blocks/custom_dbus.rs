@@ -14,8 +14,7 @@ use crate::config::SharedConfig;
 use crate::de::deserialize_opt_duration;
 use crate::errors::*;
 use crate::scheduler::Task;
-use crate::widgets::text::TextWidget;
-use crate::widgets::{I3BarWidget, State};
+use crate::widgets::*;
 
 #[derive(Clone)]
 struct CustomDBusStatus {
@@ -183,7 +182,7 @@ impl Block for CustomDBus {
     }
 
     // Returns the view of the block, comprised of widgets.
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.text]
+    fn view(&self) -> Vec<Widget> {
+        vec![self.text.clone().into()]
     }
 }

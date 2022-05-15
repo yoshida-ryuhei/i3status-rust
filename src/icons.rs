@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use serde::de::{self, Deserialize, Deserializer, MapAccess, Visitor};
-use serde_derive::Deserialize;
+use serde::de::{self, Deserializer, MapAccess, Visitor};
+use serde::Deserialize;
 
 use crate::util;
 

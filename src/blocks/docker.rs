@@ -12,9 +12,7 @@ use crate::formatting::FormatTemplate;
 use crate::http;
 use crate::scheduler::Task;
 use crate::util::expand_string;
-use crate::widgets::text::TextWidget;
-use crate::widgets::I3BarWidget;
-use crate::widgets::State;
+use crate::widgets::*;
 
 pub struct Docker {
     text: TextWidget,
@@ -125,7 +123,7 @@ impl Block for Docker {
         Ok(Some(self.update_interval.into()))
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.text]
+    fn view(&self) -> Vec<Widget> {
+        vec![self.text.clone().into()]
     }
 }

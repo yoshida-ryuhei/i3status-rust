@@ -1,20 +1,8 @@
+use super::prelude::*;
+use crate::formatting::{prefix::Prefix, value::Value};
+use nix::sys::statvfs::statvfs;
 use std::path::Path;
 use std::time::Duration;
-
-use crossbeam_channel::Sender;
-use nix::sys::statvfs::statvfs;
-use serde_derive::Deserialize;
-
-use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::SharedConfig;
-use crate::de::deserialize_duration;
-use crate::errors::*;
-use crate::formatting::FormatTemplate;
-use crate::formatting::{prefix::Prefix, value::Value};
-use crate::scheduler::Task;
-use crate::util::expand_string;
-use crate::widgets::text::TextWidget;
-use crate::widgets::{I3BarWidget, State};
 
 #[derive(Copy, Clone, Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -25,7 +13,7 @@ pub enum InfoType {
 }
 
 pub struct DiskSpace {
-    disk_space: TextWidget,
+    text: TextWidget,
     update_interval: Duration,
     path: String,
     unit: Prefix,
@@ -35,62 +23,25 @@ pub struct DiskSpace {
     alert_absolute: bool,
     format: FormatTemplate,
     icon: String,
-
-    // DEPRECATED
-    // TODO remove
-    alias: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, SmartDefault)]
 #[serde(deny_unknown_fields, default)]
 pub struct DiskSpaceConfig {
-    /// Path to collect information from
-    pub path: String,
-
-    /// Currently supported options are available, free, total and used
-    /// Sets value used for {percentage} calculation
-    /// total is the same as used, use format to set format string for output
-    pub info_type: InfoType,
-
-    /// Format string for output
-    pub format: FormatTemplate,
-
-    /// Unit that is used to display disk space. Options are B, KB, MB, GB and TB
-    pub unit: String,
-
-    /// Update interval in seconds
-    #[serde(deserialize_with = "deserialize_duration")]
-    pub interval: Duration,
-
-    /// Diskspace warning (yellow)
-    pub warning: f64,
-
-    /// Diskspace alert (red)
-    pub alert: f64,
-
-    /// use absolute (unit) values for disk space alerts
-    pub alert_absolute: bool,
-
-    /// Alias that is displayed for path
-    // DEPRECATED
-    // TODO remove
-    pub alias: String,
-}
-
-impl Default for DiskSpaceConfig {
-    fn default() -> Self {
-        Self {
-            path: "/".to_string(),
-            info_type: InfoType::Available,
-            format: FormatTemplate::default(),
-            unit: "GB".to_string(),
-            interval: Duration::from_secs(20),
-            warning: 20.,
-            alert: 10.,
-            alert_absolute: false,
-            alias: "/".to_string(),
-        }
-    }
+    #[default("/".into())]
+    path: ShellString,
+    #[default(InfoType::Available)]
+    info_type: InfoType,
+    format: FormatTemplate,
+    #[default("GB".into())]
+    unit: String,
+    #[default(20.into())]
+    interval: Seconds,
+    #[default(20.0)]
+    warning: f64,
+    #[default(10.0)]
+    alert: f64,
+    alert_absolute: bool,
 }
 
 enum AlertType {
@@ -123,24 +74,24 @@ impl DiskSpace {
     }
 }
 
+#[async_trait]
 impl ConfigBlock for DiskSpace {
     type Config = DiskSpaceConfig;
 
-    fn new(
+    async fn new(
         id: usize,
-        block_config: Self::Config,
+        config: Self::Config,
         shared_config: SharedConfig,
-        _tx_update_request: Sender<Task>,
+        _: Sender<usize>,
     ) -> Result<Self> {
-        let icon = shared_config.get_icon("disk_drive")?;
-
         Ok(DiskSpace {
-            update_interval: block_config.interval,
-            disk_space: TextWidget::new(id, 0, shared_config),
-            path: expand_string(&block_config.path)?,
-            format: block_config.format.with_default("{available}")?,
-            info_type: block_config.info_type,
-            unit: match block_config.unit.as_str() {
+            icon: shared_config.get_icon("disk_drive")?.trim().to_string(),
+            update_interval: config.interval.0,
+            text: TextWidget::new(id, 0, shared_config),
+            path: config.path.expand()?.into(),
+            format: config.format.with_default("{available}")?,
+            info_type: config.info_type,
+            unit: match config.unit.as_str() {
                 "TB" => Prefix::Tera,
                 "GB" => Prefix::Giga,
                 "MB" => Prefix::Mega,
@@ -148,21 +99,20 @@ impl ConfigBlock for DiskSpace {
                 "B" => Prefix::One,
                 x => return Err(Error::new(format!("unknown unit '{x}'"))),
             },
-            warning: block_config.warning,
-            alert: block_config.alert,
-            alert_absolute: block_config.alert_absolute,
-            icon: icon.trim().to_string(),
-            alias: block_config.alias,
+            warning: config.warning,
+            alert: config.alert,
+            alert_absolute: config.alert_absolute,
         })
     }
 }
 
+#[async_trait]
 impl Block for DiskSpace {
-    fn name(&self) -> &'static str {
-        "disk_space"
+    fn interval(&self) -> Option<Duration> {
+        Some(self.update_interval)
     }
 
-    fn update(&mut self) -> Result<Option<Update>> {
+    async fn update(&mut self) -> Result<()> {
         let statvfs =
             statvfs(Path::new(self.path.as_str())).error_msg("failed to retrieve statvfs")?;
 
@@ -190,7 +140,7 @@ impl Block for DiskSpace {
         }
 
         let percentage = result / (total as f64) * 100.;
-        let values = map!(
+        self.text.set_texts(self.format.render(&map! {
             "percentage" => Value::from_float(percentage).percents(),
             "path" => Value::from_string(self.path.clone()),
             "total" => Value::from_float(total as f64).bytes(),
@@ -198,10 +148,7 @@ impl Block for DiskSpace {
             "available" => Value::from_float(available as f64).bytes(),
             "free" => Value::from_float(free as f64).bytes(),
             "icon" => Value::from_string(self.icon.to_string()),
-            //TODO remove
-            "alias" => Value::from_string(self.alias.clone()),
-        );
-        self.disk_space.set_texts(self.format.render(&values)?);
+        })?);
 
         // Send percentage to alert check if we don't want absolute alerts
         let alert_val = if self.alert_absolute {
@@ -217,14 +164,13 @@ impl Block for DiskSpace {
         } else {
             percentage
         };
+        self.text
+            .set_state(self.compute_state(alert_val, self.warning, self.alert, alert_type));
 
-        let state = self.compute_state(alert_val, self.warning, self.alert, alert_type);
-        self.disk_space.set_state(state);
-
-        Ok(Some(self.update_interval.into()))
+        Ok(())
     }
 
     fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.disk_space]
+        vec![&self.text]
     }
 }

@@ -11,8 +11,7 @@ use crate::de::deserialize_opt_duration;
 use crate::errors::*;
 use crate::protocol::i3bar_event::I3BarEvent;
 use crate::scheduler::Task;
-use crate::widgets::text::TextWidget;
-use crate::widgets::{I3BarWidget, State};
+use crate::widgets::*;
 
 pub struct Toggle {
     text: TextWidget,
@@ -114,8 +113,8 @@ impl Block for Toggle {
         Ok(self.update_interval.map(|d| d.into()))
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.text]
+    fn view(&self) -> Vec<Widget> {
+        vec![self.text.clone().into()]
     }
 
     fn click(&mut self, _e: &I3BarEvent) -> Result<()> {
@@ -128,7 +127,7 @@ impl Block for Toggle {
         let output = Command::new(env::var("SHELL").unwrap_or_else(|_| "sh".to_owned()))
             .args(&["-c", cmd])
             .output()
-            .error_msg( "failed to run toggle command")?;
+            .error_msg("failed to run toggle command")?;
 
         if output.status.success() {
             self.text.set_state(State::Idle);

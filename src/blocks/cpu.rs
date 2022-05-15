@@ -1,23 +1,11 @@
 use std::fs::{read_to_string, File};
 use std::io::prelude::*;
 use std::io::BufReader;
-use std::time::Duration;
 
-use crossbeam_channel::Sender;
-use serde_derive::Deserialize;
-
-use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::SharedConfig;
-use crate::de::deserialize_duration;
-use crate::errors::*;
-use crate::formatting::value::Value;
-use crate::formatting::FormatTemplate;
-use crate::scheduler::Task;
-use crate::widgets::text::TextWidget;
-use crate::widgets::{I3BarWidget, State};
+use super::prelude::*;
 
 pub struct Cpu {
-    output: TextWidget,
+    text: TextWidget,
     prev_util: Vec<(u64, u64)>,
     update_interval: Duration,
     minimum_info: u64,
@@ -28,72 +16,55 @@ pub struct Cpu {
     boost_icon_off: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, SmartDefault)]
 #[serde(deny_unknown_fields, default)]
 pub struct CpuConfig {
-    /// Update interval in seconds
-    #[serde(deserialize_with = "deserialize_duration")]
-    pub interval: Duration,
-
-    /// Minimum usage, where state is set to info
-    pub info: u64,
-
-    /// Minimum usage, where state is set to warning
-    pub warning: u64,
-
-    /// Minimum usage, where state is set to critical
-    pub critical: u64,
-
-    /// Format override
-    pub format: FormatTemplate,
+    #[default(1.into())]
+    interval: Seconds,
+    #[default(30)]
+    info: u64,
+    #[default(60)]
+    warning: u64,
+    #[default(90)]
+    critical: u64,
+    format: FormatTemplate,
 }
 
-impl Default for CpuConfig {
-    fn default() -> Self {
-        Self {
-            interval: Duration::from_secs(1),
-            info: 30,
-            warning: 60,
-            critical: 90,
-            format: FormatTemplate::default(),
-        }
-    }
-}
-
+#[async_trait]
 impl ConfigBlock for Cpu {
     type Config = CpuConfig;
 
-    fn new(
+    async fn new(
         id: usize,
-        block_config: Self::Config,
+        config: Self::Config,
         shared_config: SharedConfig,
-        _tx_update_request: Sender<Task>,
+        _: Sender<usize>,
     ) -> Result<Self> {
         Ok(Cpu {
-            update_interval: block_config.interval,
+            update_interval: config.interval.0,
             prev_util: Vec::with_capacity(32),
-            minimum_info: block_config.info,
-            minimum_warning: block_config.warning,
-            minimum_critical: block_config.critical,
+            minimum_info: config.info,
+            minimum_warning: config.warning,
+            minimum_critical: config.critical,
             boost_icon_on: shared_config.get_icon("cpu_boost_on")?,
             boost_icon_off: shared_config.get_icon("cpu_boost_off")?,
-            output: TextWidget::new(id, 0, shared_config).with_icon("cpu")?,
-            format: block_config.format.with_default("{utilization}")?,
+            text: TextWidget::new(id, 0, shared_config).with_icon("cpu")?,
+            format: config.format.with_default("{utilization}")?,
         })
     }
 }
 
+#[async_trait]
 impl Block for Cpu {
-    fn name(&self) -> &'static str {
-        "cpu"
+    fn interval(&self) -> Option<Duration> {
+        Some(self.update_interval)
     }
 
-    fn update(&mut self) -> Result<Option<Update>> {
+    async fn update(&mut self) -> Result<()> {
         // Read frequencies (read in MHz, store in Hz)
         let mut freqs = Vec::with_capacity(32);
         let mut freqs_avg = 0.0;
-        let freqs_f =
-            File::open("/proc/cpuinfo").error_msg( "failed to read /proc/cpuinfo")?;
+        let freqs_f = File::open("/proc/cpuinfo").error_msg("failed to read /proc/cpuinfo")?;
         for line in BufReader::new(freqs_f).lines().scan((), |_, x| x.ok()) {
             if line.starts_with("cpu MHz") {
                 let words = line.split(' ');
@@ -112,8 +83,8 @@ impl Block for Cpu {
 
         // Read utilizations
         let mut utilizations = Vec::with_capacity(32);
-        let utilizations_f = File::open("/proc/stat")
-            .error_msg( "Your system doesn't support /proc/stat")?;
+        let utilizations_f =
+            File::open("/proc/stat").error_msg("Your system doesn't support /proc/stat")?;
         for (i, line) in BufReader::new(utilizations_f)
             .lines()
             .scan((), |_, x| x.ok())
@@ -162,13 +133,6 @@ impl Block for Cpu {
         let (avg, utilizations) = utilizations.split_first().unwrap();
         let avg_utilization = avg * 100.;
 
-        self.output.set_state(match avg_utilization as u64 {
-            x if x > self.minimum_critical => State::Critical,
-            x if x > self.minimum_warning => State::Warning,
-            x if x > self.minimum_info => State::Info,
-            _ => State::Idle,
-        });
-
         let mut barchart = String::new();
         const BOXCHARS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
         for utilization in utilizations {
@@ -200,13 +164,19 @@ impl Block for Cpu {
             );
         }
 
-        self.output.set_texts(self.format.render(&values)?);
+        self.text.set_texts(self.format.render(&values)?);
+        self.text.set_state(match avg_utilization as u64 {
+            x if x > self.minimum_critical => State::Critical,
+            x if x > self.minimum_warning => State::Warning,
+            x if x > self.minimum_info => State::Info,
+            _ => State::Idle,
+        });
 
-        Ok(Some(self.update_interval.into()))
+        Ok(())
     }
 
     fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.output]
+        vec![&self.text]
     }
 }
 

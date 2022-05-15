@@ -12,8 +12,7 @@ use crate::errors::*;
 use crate::formatting::value::Value;
 use crate::formatting::FormatTemplate;
 use crate::scheduler::Task;
-use crate::widgets::text::TextWidget;
-use crate::widgets::{I3BarWidget, State};
+use crate::widgets::*;
 
 pub struct Dnf {
     output: TextWidget,
@@ -131,8 +130,8 @@ impl Block for Dnf {
         "dnf"
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.output]
+    fn view(&self) -> Vec<Widget> {
+        vec![self.output.clone().into()]
     }
 
     fn update(&mut self) -> Result<Option<Update>> {

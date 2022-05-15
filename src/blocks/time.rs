@@ -1,80 +1,47 @@
-use std::collections::HashMap;
-use std::convert::TryInto;
-use std::time::Duration;
-
-use chrono::{
-    offset::{Local, Utc},
-    Locale,
-};
+use super::prelude::*;
+use chrono::offset::{Local, Utc};
+use chrono::Locale;
 use chrono_tz::Tz;
-use crossbeam_channel::Sender;
-use serde_derive::Deserialize;
-
-use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::SharedConfig;
-use crate::de::deserialize_duration;
-use crate::errors::*;
-use crate::formatting::FormatTemplate;
-use crate::scheduler::Task;
-use crate::widgets::text::TextWidget;
-use crate::widgets::I3BarWidget;
 
 pub struct Time {
-    time: TextWidget,
+    text: TextWidget,
     update_interval: Duration,
     formats: (String, Option<String>),
     timezone: Option<Tz>,
     locale: Option<String>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, SmartDefault)]
 #[serde(deny_unknown_fields, default)]
 pub struct TimeConfig {
-    /// Format string.
-    ///
-    /// See [chrono docs](https://docs.rs/chrono/0.3.0/chrono/format/strftime/index.html#specifiers) for all options.
-    pub format: FormatTemplate,
-
-    /// Update interval in seconds
-    #[serde(deserialize_with = "deserialize_duration")]
-    pub interval: Duration,
-
-    pub timezone: Option<Tz>,
-
-    pub locale: Option<String>,
+    format: FormatTemplate,
+    #[default(5.into())]
+    interval: Seconds,
+    timezone: Option<Tz>,
+    locale: Option<String>,
 }
 
-impl Default for TimeConfig {
-    fn default() -> Self {
-        Self {
-            format: FormatTemplate::default(),
-            interval: Duration::from_secs(5),
-            timezone: None,
-            locale: None,
-        }
-    }
-}
-
+#[async_trait]
 impl ConfigBlock for Time {
     type Config = TimeConfig;
 
-    fn new(
+    async fn new(
         id: usize,
-        block_config: Self::Config,
+        config: Self::Config,
         shared_config: SharedConfig,
-        _tx_update_request: Sender<Task>,
+        _: Sender<usize>,
     ) -> Result<Self> {
         Ok(Time {
-            time: TextWidget::new(id, 0, shared_config)
+            text: TextWidget::new(id, 0, shared_config)
                 .with_text("")
                 .with_icon("time")?,
-            update_interval: block_config.interval,
-            formats: block_config
+            update_interval: config.interval.0,
+            formats: config
                 .format
                 .with_default("%a %d/%m %R")?
                 .render(&HashMap::<&str, _>::new())?,
-            timezone: block_config.timezone,
-            locale: block_config.locale,
+            timezone: config.timezone,
+            locale: config.locale,
         })
     }
 }
@@ -100,12 +67,13 @@ impl Time {
     }
 }
 
+#[async_trait]
 impl Block for Time {
-    fn name(&self) -> &'static str {
-        "time"
+    fn interval(&self) -> Option<Duration> {
+        Some(self.update_interval)
     }
 
-    fn update(&mut self) -> Result<Option<Update>> {
+    async fn update(&mut self) -> Result<()> {
         if self.timezone.is_none() {
             // Update timezone because `chrono` will not do that for us.
             // https://github.com/chronotope/chrono/issues/272
@@ -117,12 +85,13 @@ impl Block for Time {
             Some(short_fmt) => Some(self.get_formatted_time(short_fmt)?),
             None => None,
         };
-        self.time.set_texts((full, short));
-        Ok(Some(self.update_interval.into()))
+
+        self.text.set_texts((full, short));
+        Ok(())
     }
 
     fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.time]
+        vec![&self.text]
     }
 }
 

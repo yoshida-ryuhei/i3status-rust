@@ -4,11 +4,40 @@ pub mod text;
 use std::str::FromStr;
 
 use serde::de::value::{Error, StrDeserializer};
-use serde::de::{Deserialize, IntoDeserializer};
-use serde_derive::Deserialize;
+use serde::de::IntoDeserializer;
+use serde::Deserialize;
 
 use crate::protocol::i3bar_block::I3BarBlock;
 use crate::themes::{Color, Theme};
+
+pub use rotatingtext::RotatingTextWidget;
+pub use text::TextWidget;
+
+pub enum Widget {
+    Text(TextWidget),
+    Rotating(RotatingTextWidget),
+}
+
+impl From<TextWidget> for Widget {
+    fn from(w: TextWidget) -> Self {
+        Self::Text(w)
+    }
+}
+
+impl From<RotatingTextWidget> for Widget {
+    fn from(w: RotatingTextWidget) -> Self {
+        Self::Rotating(w)
+    }
+}
+
+impl Widget {
+    pub fn get_data(&self) -> I3BarBlock {
+        match self {
+            Self::Text(w) => w.get_data(),
+            Self::Rotating(w) => w.get_data(),
+        }
+    }
+}
 
 #[derive(Debug, Copy, Clone, Deserialize)]
 pub enum Spacing {

@@ -14,8 +14,7 @@ use crate::errors::*;
 use crate::protocol::i3bar_event::{I3BarEvent, MouseButton};
 use crate::scheduler::Task;
 use crate::util::pseudo_uuid;
-use crate::widgets::text::TextWidget;
-use crate::widgets::{I3BarWidget, Spacing, State};
+use crate::widgets::*;
 
 pub struct NvidiaGpu {
     id: usize,
@@ -353,27 +352,27 @@ impl Block for NvidiaGpu {
         Ok(Some(self.update_interval.into()))
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
-        let mut widgets: Vec<&dyn I3BarWidget> = vec![&self.name_widget];
+    fn view(&self) -> Vec<Widget> {
+        let mut widgets: Vec<Widget> = vec![self.name_widget.clone().into()];
 
         if self.gpu_enabled {
             if let Some(ref utilization_widget) = self.show_utilization {
-                widgets.push(utilization_widget);
+                widgets.push(utilization_widget.clone().into());
             }
             if let Some(ref memory_widget) = self.show_memory {
-                widgets.push(memory_widget);
+                widgets.push(memory_widget.clone().into());
             }
             if let Some(ref temperature_widget) = self.show_temperature {
-                widgets.push(temperature_widget);
+                widgets.push(temperature_widget.clone().into());
             }
             if let Some(ref fan_widget) = self.show_fan {
-                widgets.push(fan_widget);
+                widgets.push(fan_widget.clone().into());
             }
             if let Some(ref clocks_widget) = self.show_clocks {
-                widgets.push(clocks_widget);
+                widgets.push(clocks_widget.clone().into());
             }
             if let Some(ref power_draw_widget) = self.show_power_draw {
-                widgets.push(power_draw_widget);
+                widgets.push(power_draw_widget.clone().into());
             }
         }
         widgets

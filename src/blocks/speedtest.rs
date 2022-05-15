@@ -1,186 +1,90 @@
-use std::process::Command;
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::{Duration, Instant};
-
-use crossbeam_channel::{unbounded, Receiver, Sender};
-use serde_derive::Deserialize;
-
-use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::SharedConfig;
-use crate::de::deserialize_duration;
-use crate::errors::*;
-use crate::formatting::value::Value;
-use crate::formatting::FormatTemplate;
-use crate::protocol::i3bar_event::{I3BarEvent, MouseButton};
-use crate::scheduler::Task;
-use crate::widgets::text::TextWidget;
-use crate::widgets::I3BarWidget;
+use super::prelude::*;
 
 pub struct SpeedTest {
-    vals: Arc<Mutex<(bool, Vec<f32>)>>,
-    output: TextWidget,
+    text: TextWidget,
     format: FormatTemplate,
     interval: Duration,
     ping_icon: String,
     down_icon: String,
     up_icon: String,
-    send: Sender<()>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, SmartDefault)]
 #[serde(deny_unknown_fields, default)]
 pub struct SpeedTestConfig {
-    /// Format override
-    pub format: FormatTemplate,
-
-    /// Update interval in seconds
-    #[serde(deserialize_with = "deserialize_duration")]
-    pub interval: Duration,
+    format: FormatTemplate,
+    #[default(1800.into())]
+    interval: Seconds,
 }
 
-impl Default for SpeedTestConfig {
-    fn default() -> Self {
-        Self {
-            format: FormatTemplate::default(),
-            interval: Duration::from_secs(1800),
-        }
-    }
-}
-
-fn get_values() -> Result<String> {
-    let mut cmd = Command::new("speedtest-cli");
-    cmd.arg("--simple");
-    String::from_utf8(
-        cmd.output()
-            .error_msg("could not get speedtest-cli output")?
-            .stdout,
-    )
-    .error_msg("could not parse speedtest-cli output")
-}
-
-fn parse_values(output: &str) -> Result<Vec<f32>> {
-    let mut vals: Vec<f32> = Vec::with_capacity(3);
-
-    for line in output.lines() {
-        let mut word = line.split_whitespace();
-        word.next();
-        vals.push(
-            word.next()
-                .error_msg("missing data")?
-                .parse::<f32>()
-                .error_msg("Unable to parse data")?,
-        );
-    }
-
-    Ok(vals)
-}
-
-fn make_thread(
-    recv: Receiver<()>,
-    done: Sender<Task>,
-    values: Arc<Mutex<(bool, Vec<f32>)>>,
-    id: usize,
-) {
-    thread::Builder::new()
-        .name("speedtest".into())
-        .spawn(move || loop {
-            if recv.recv().is_ok() {
-                if let Ok(output) = get_values() {
-                    if let Ok(vals) = parse_values(&output) {
-                        if vals.len() == 3 {
-                            let (ref mut update, ref mut values) = *values
-                                .lock()
-                                .expect("main thread paniced while holding speedtest-values mutex");
-                            *values = vals;
-
-                            *update = true;
-
-                            done.send(Task {
-                                id,
-                                update_time: Instant::now(),
-                            })
-                            .unwrap();
-                        }
-                    }
-                }
-            }
-        })
-        .unwrap();
-}
-
+#[async_trait]
 impl ConfigBlock for SpeedTest {
     type Config = SpeedTestConfig;
 
-    fn new(
+    async fn new(
         id: usize,
         block_config: Self::Config,
         shared_config: SharedConfig,
-        done: Sender<Task>,
+        _: Sender<usize>,
     ) -> Result<Self> {
-        // Create all the things we are going to send and take for ourselves.
-        let (send, recv): (Sender<()>, Receiver<()>) = unbounded();
-        let vals = Arc::new(Mutex::new((false, vec![])));
-
-        // Make the update thread
-        make_thread(recv, done, vals.clone(), id);
-
         Ok(SpeedTest {
-            vals,
             format: block_config
                 .format
                 .with_default("{ping}{speed_down}{speed_up}")?,
-            interval: block_config.interval,
+            interval: block_config.interval.0,
             ping_icon: shared_config.get_icon("ping")?,
             down_icon: shared_config.get_icon("net_down")?,
             up_icon: shared_config.get_icon("net_up")?,
-            output: TextWidget::new(id, 0, shared_config).with_text("..."),
-            send,
+            text: TextWidget::new(id, 0, shared_config).with_text("..."),
         })
     }
 }
 
+#[async_trait]
 impl Block for SpeedTest {
-    fn name(&self) -> &'static str {
-        "speedtest"
+    fn interval(&self) -> Option<Duration> {
+        Some(self.interval)
     }
 
-    fn update(&mut self) -> Result<Option<Update>> {
-        let (ref mut updated, ref vals) = *self.vals.lock().unwrap();
+    async fn update(&mut self) -> Result<()> {
+        let stats = Stats::new().await?;
 
-        if *updated {
-            *updated = false;
+        self.text.set_texts(self.format.render(&map! {
+            "ping" => Value::from_float(stats.ping * 1e-3).seconds().icon(self.ping_icon.clone()),
+            "speed_down" => Value::from_float(stats.download).bits().icon(self.down_icon.clone()),
+            "speed_up" => Value::from_float(stats.upload).bits().icon(self.up_icon.clone()),
+        })?);
 
-            if vals.len() == 3 {
-                // ping is in seconds
-                let ping = vals[0] as f64 / 1_000.0;
-                let down = vals[1] as f64 * 1_000_000.0;
-                let up = vals[2] as f64 * 1_000_000.0;
-
-                let values = map!(
-                    "ping" => Value::from_float(ping).seconds().icon(self.ping_icon.clone()),
-                    "speed_down" => Value::from_float(down).bits().icon(self.down_icon.clone()),
-                    "speed_up" => Value::from_float(up).bits().icon(self.up_icon.clone()),
-                );
-
-                self.output.set_texts(self.format.render(&values)?);
-            }
-
-            Ok(None)
-        } else {
-            self.send.send(()).error_msg("send errror")?;
-            Ok(Some(self.interval.into()))
-        }
-    }
-
-    fn click(&mut self, e: &I3BarEvent) -> Result<()> {
-        if let MouseButton::Left = e.button {
-            self.send.send(()).error_msg("send error")?;
-        }
         Ok(())
     }
 
+    async fn click(&mut self, e: &I3BarEvent) -> Result<bool> {
+        Ok(e.button == MouseButton::Left)
+    }
+
     fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.output]
+        vec![&self.text]
+    }
+}
+
+#[derive(Deserialize, Debug, Clone, Copy)]
+struct Stats {
+    /// Download speed in bits per second
+    download: f64,
+    /// Upload speed in bits per second
+    upload: f64,
+    /// Ping time in ms
+    ping: f64,
+}
+
+impl Stats {
+    async fn new() -> Result<Self> {
+        let output = Command::new("speedtest-cli")
+            .arg("--json")
+            .output()
+            .await
+            .error_msg("could not get speedtest-cli output")?
+            .stdout;
+        serde_json::from_slice(&output).error_msg("could not parse speedtest-cli json")
     }
 }

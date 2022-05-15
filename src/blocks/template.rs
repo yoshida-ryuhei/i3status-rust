@@ -9,8 +9,7 @@ use crate::de::deserialize_duration;
 use crate::errors::*;
 use crate::protocol::i3bar_event::I3BarEvent;
 use crate::scheduler::Task;
-use crate::widgets::text::TextWidget;
-use crate::widgets::I3BarWidget;
+use crate::widgets::*;
 
 pub struct Template {
     text: TextWidget,
@@ -59,20 +58,21 @@ impl ConfigBlock for Template {
     }
 }
 
+#[async_trait]
 impl Block for Template {
     fn name(&self) -> &'static str {
         "<block name>"
     }
 
-    fn update(&mut self) -> Result<Option<Update>> {
+    async fn update(&mut self) -> Result<Option<Update>> {
         Ok(Some(self.update_interval.into()))
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.text]
+    fn view(&self) -> Vec<Widget> {
+        vec![self.text.clone().into()]
     }
 
-    fn click(&mut self, _: &I3BarEvent) -> Result<()> {
+    async fn click(&mut self, _: &I3BarEvent) -> Result<()> {
         Ok(())
     }
 }

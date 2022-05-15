@@ -19,8 +19,7 @@ use crate::formatting::FormatTemplate;
 use crate::protocol::i3bar_event::{I3BarEvent, MouseButton};
 use crate::scheduler::Task;
 use crate::util::has_command;
-use crate::widgets::text::TextWidget;
-use crate::widgets::{I3BarWidget, State};
+use crate::widgets::*;
 
 pub struct Pacman {
     output: TextWidget,
@@ -274,11 +273,11 @@ impl Block for Pacman {
         "pacman"
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
+    fn view(&self) -> Vec<Widget> {
         if self.uptodate && self.hide_when_uptodate {
             vec![]
         } else {
-            vec![&self.output]
+            vec![self.output.clone().into()]
         }
     }
 

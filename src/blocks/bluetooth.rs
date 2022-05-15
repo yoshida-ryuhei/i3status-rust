@@ -18,8 +18,7 @@ use crate::formatting::value::Value;
 use crate::formatting::FormatTemplate;
 use crate::protocol::i3bar_event::{I3BarEvent, MouseButton};
 use crate::scheduler::Task;
-use crate::widgets::text::TextWidget;
-use crate::widgets::{I3BarWidget, State};
+use crate::widgets::*;
 
 pub struct BluetoothDevice {
     pub path: String,
@@ -349,11 +348,11 @@ impl Block for Bluetooth {
         Ok(())
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
+    fn view(&self) -> Vec<Widget> {
         if !self.device.connected() && self.hide_disconnected {
             vec![]
         } else {
-            vec![&self.output]
+            vec![self.output.clone().into()]
         }
     }
 }

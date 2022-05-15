@@ -12,8 +12,7 @@ use crate::errors::*;
 use crate::protocol::i3bar_event::I3BarEvent;
 use crate::scheduler::Task;
 use crate::util::{expand_string, xdg_config_home};
-use crate::widgets::text::TextWidget;
-use crate::widgets::{I3BarWidget, State};
+use crate::widgets::*;
 use chrono::offset::Local;
 use chrono::DateTime;
 use crossbeam_channel::Sender;
@@ -176,8 +175,8 @@ impl Block for Watson {
         Ok(())
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.text]
+    fn view(&self) -> Vec<Widget> {
+        vec![self.text.clone().into()]
     }
 }
 

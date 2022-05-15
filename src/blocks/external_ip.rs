@@ -14,8 +14,7 @@ use crate::formatting::FormatTemplate;
 use crate::http;
 use crate::scheduler::Task;
 use crate::util::country_flag_from_iso_code;
-use crate::widgets::text::TextWidget;
-use crate::widgets::{I3BarWidget, State};
+use crate::widgets::*;
 use crate::Duration;
 
 const API_ENDPOINT: &str = "https://ipapi.co/json/";
@@ -153,7 +152,7 @@ impl Block for ExternalIP {
     fn update(&mut self) -> Result<Option<Update>> {
         let (external_ip, success) = {
             let ip_info: Result<IPAddressInfo> =
-                match http::http_get_json(API_ENDPOINT, Some(Duration::from_secs(3)), vec![]) {
+                match http::http_get_json(API_ENDPOINT, Some(Duration::from_secs(3)), &[]) {
                     Ok(ip_info_json) => serde_json::from_value(ip_info_json.content)
                         .error_msg("Failed to decode JSON"),
                     _ => Err(Error::new("Failed to contact API")),
@@ -221,7 +220,7 @@ impl Block for ExternalIP {
         }
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.output]
+    fn view(&self) -> Vec<Widget> {
+        vec![self.output.clone().into()]
     }
 }

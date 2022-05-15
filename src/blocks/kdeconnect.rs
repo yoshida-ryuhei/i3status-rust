@@ -16,8 +16,7 @@ use crate::formatting::value::Value;
 use crate::formatting::FormatTemplate;
 use crate::scheduler::Task;
 use crate::util::battery_level_to_icon;
-use crate::widgets::text::TextWidget;
-use crate::widgets::{I3BarWidget, State};
+use crate::widgets::*;
 
 pub struct KDEConnect {
     device_id: String,
@@ -626,8 +625,8 @@ impl Block for KDEConnect {
     }
 
     // Returns the view of the block, comprised of widgets.
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.output]
+    fn view(&self) -> Vec<Widget> {
+        vec![self.output.clone().into()]
     }
 }
 

@@ -1,52 +1,18 @@
-use crate::blocks::Update;
-use std::cmp;
-use std::collections::BinaryHeap;
-use std::fmt;
-use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::blocks::Block;
-use crate::errors::*;
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Task {
     pub id: usize,
     pub update_time: Instant,
 }
 
-impl fmt::Display for Task {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl cmp::PartialEq for Task {
-    fn eq(&self, other: &Task) -> bool {
-        self.update_time.eq(&other.update_time)
-    }
-}
-
-impl cmp::Eq for Task {}
-
-impl cmp::PartialOrd for Task {
-    fn partial_cmp(&self, other: &Task) -> Option<cmp::Ordering> {
-        other.update_time.partial_cmp(&self.update_time)
-    }
-}
-
-impl cmp::Ord for Task {
-    fn cmp(&self, other: &Task) -> cmp::Ordering {
-        other.update_time.cmp(&self.update_time)
-    }
-}
-
 pub struct UpdateScheduler {
-    pub schedule: BinaryHeap<Task>,
+    pub schedule: Vec<Task>,
 }
 
 impl UpdateScheduler {
     pub fn new(blocks_cnt: usize) -> UpdateScheduler {
-        let mut schedule = BinaryHeap::new();
+        let mut schedule = Vec::with_capacity(blocks_cnt);
 
         let now = Instant::now();
         for id in 0..blocks_cnt {
@@ -60,65 +26,29 @@ impl UpdateScheduler {
     }
 
     pub fn time_to_next_update(&self) -> Option<Duration> {
-        if let Some(peeked) = self.schedule.peek() {
-            let next_update = peeked.update_time;
-            let now = Instant::now();
-
-            if next_update > now {
-                Some(next_update - now)
-            } else {
-                Some(Duration::new(0, 0))
+        let now = Instant::now();
+        let mut dur: Option<Duration> = None;
+        for task in &self.schedule {
+            if task.update_time <= now {
+                return Some(Duration::ZERO);
             }
-        } else {
-            None
+            if let Some(dur) = &mut dur {
+                *dur = (*dur).min(task.update_time - now);
+            } else {
+                dur = Some(task.update_time - now);
+            }
         }
+        dur
     }
 
-    pub fn do_scheduled_updates(&mut self, blocks: &mut [Box<dyn Block>]) -> Result<()> {
-        let t = self
-            .schedule
-            .pop()
-            .error_msg("scheduler: schedule is empty")?;
-        let mut tasks_next = vec![t.clone()];
+    pub fn push(&mut self, id: usize, when: Instant) {
+        self.schedule.push(Task {
+            id,
+            update_time: when,
+        });
+    }
 
-        while !self.schedule.is_empty()
-            && t.update_time
-                == self
-                    .schedule
-                    .peek()
-                    .error_msg("scheduler: schedule is empty")?
-                    .update_time
-        {
-            tasks_next.push(
-                self.schedule
-                    .pop()
-                    .error_msg("scheduler: schedule is empty")?,
-            )
-        }
-
-        let now = Instant::now();
-        if t.update_time > now {
-            thread::sleep(t.update_time - now);
-        }
-
-        let now = Instant::now();
-
-        for task in tasks_next {
-            if let Some(dur) = blocks
-                .get_mut(task.id as usize)
-                .error_msg("scheduler: could not get required block")?
-                .update()?
-            {
-                match dur {
-                    Update::Every(d) => self.schedule.push(Task {
-                        id: task.id,
-                        update_time: now + d,
-                    }),
-                    Update::Once => {} // do not schedule this task again
-                }
-            }
-        }
-
-        Ok(())
+    pub fn pop(&mut self, id: usize) {
+        self.schedule.retain(|task| task.id != id);
     }
 }

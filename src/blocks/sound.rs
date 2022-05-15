@@ -1,12 +1,9 @@
 use std::cmp::{max, min};
 use std::collections::BTreeMap;
-use std::io::Read;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+use std::sync::mpsc::{self as std_mpsc, SyncSender as StdSender};
 use std::thread;
-use std::time::{Duration, Instant};
-
-use crossbeam_channel::Sender;
-use serde_derive::Deserialize;
+use tokio::process::Command;
 
 #[cfg(feature = "pulseaudio")]
 use {
@@ -21,8 +18,6 @@ use {
     crate::pulse::proplist::properties::DEVICE_FORM_FACTOR,
     crate::pulse::proplist::{properties, Proplist},
     crate::pulse::volume::{ChannelVolumes, Volume},
-    crossbeam_channel::unbounded,
-    lazy_static::lazy_static,
     std::cell::RefCell,
     std::collections::HashMap,
     std::convert::{TryFrom, TryInto},
@@ -31,18 +26,9 @@ use {
     std::sync::Mutex,
 };
 
-use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::SharedConfig;
-use crate::config::{LogicalDirection, Scrolling};
-use crate::errors::*;
-use crate::formatting::value::Value;
-use crate::formatting::FormatTemplate;
-use crate::protocol::i3bar_event::{I3BarEvent, MouseButton};
-use crate::scheduler::Task;
-use crate::subprocess::spawn_child_async;
-use crate::widgets::text::TextWidget;
-use crate::widgets::{I3BarWidget, State};
+use super::prelude::*;
 
+#[async_trait]
 trait SoundDevice {
     fn volume(&self) -> u32;
     fn muted(&self) -> bool;
@@ -51,10 +37,10 @@ trait SoundDevice {
     fn active_port(&self) -> Option<&str>;
     fn form_factor(&self) -> Option<&str>;
 
-    fn get_info(&mut self) -> Result<()>;
-    fn set_volume(&mut self, step: i32, max_vol: Option<u32>) -> Result<()>;
-    fn toggle(&mut self) -> Result<()>;
-    fn monitor(&mut self, id: usize, tx_update_request: Sender<Task>) -> Result<()>;
+    async fn get_info(&mut self) -> Result<()>;
+    async fn set_volume(&mut self, step: i32, max_vol: Option<u32>) -> Result<()>;
+    async fn toggle(&mut self) -> Result<()>;
+    fn monitor(&mut self, id: usize, tx_update_request: Sender<usize>) -> Result<()>;
 }
 
 struct AlsaSoundDevice {
@@ -66,7 +52,7 @@ struct AlsaSoundDevice {
 }
 
 impl AlsaSoundDevice {
-    fn new(name: String, device: String, natural_mapping: bool) -> Result<Self> {
+    async fn new(name: String, device: String, natural_mapping: bool) -> Result<Self> {
         let mut sd = AlsaSoundDevice {
             name,
             device,
@@ -74,12 +60,13 @@ impl AlsaSoundDevice {
             volume: 0,
             muted: false,
         };
-        sd.get_info()?;
+        sd.get_info().await?;
 
         Ok(sd)
     }
 }
 
+#[async_trait]
 impl SoundDevice for AlsaSoundDevice {
     fn volume(&self) -> u32 {
         self.volume
@@ -101,7 +88,7 @@ impl SoundDevice for AlsaSoundDevice {
         None
     }
 
-    fn get_info(&mut self) -> Result<()> {
+    async fn get_info(&mut self) -> Result<()> {
         let mut args = Vec::new();
         if self.natural_mapping {
             args.push("-M")
@@ -111,6 +98,7 @@ impl SoundDevice for AlsaSoundDevice {
         let output = Command::new("amixer")
             .args(&args)
             .output()
+            .await
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
             .error_msg("could not run amixer to get sound info")?;
 
@@ -136,7 +124,7 @@ impl SoundDevice for AlsaSoundDevice {
         Ok(())
     }
 
-    fn set_volume(&mut self, step: i32, max_vol: Option<u32>) -> Result<()> {
+    async fn set_volume(&mut self, step: i32, max_vol: Option<u32>) -> Result<()> {
         let new_vol = max(0, self.volume as i32 + step) as u32;
         let capped_volume = if let Some(vol_cap) = max_vol {
             min(new_vol, vol_cap)
@@ -153,6 +141,7 @@ impl SoundDevice for AlsaSoundDevice {
         Command::new("amixer")
             .args(&args)
             .output()
+            .await
             .error_msg("failed to set volume")?;
 
         self.volume = capped_volume;
@@ -160,7 +149,7 @@ impl SoundDevice for AlsaSoundDevice {
         Ok(())
     }
 
-    fn toggle(&mut self) -> Result<()> {
+    async fn toggle(&mut self) -> Result<()> {
         let mut args = Vec::new();
         if self.natural_mapping {
             args.push("-M")
@@ -170,6 +159,7 @@ impl SoundDevice for AlsaSoundDevice {
         Command::new("amixer")
             .args(&args)
             .output()
+            .await
             .error_msg("failed to toggle mute")?;
 
         self.muted = !self.muted;
@@ -177,39 +167,31 @@ impl SoundDevice for AlsaSoundDevice {
         Ok(())
     }
 
-    fn monitor(&mut self, id: usize, tx_update_request: Sender<Task>) -> Result<()> {
-        // Monitor volume changes in a separate thread.
-        thread::Builder::new()
-            .name("sound_alsa".into())
-            .spawn(move || {
-                // Line-buffer to reduce noise.
-                let mut monitor = Command::new("stdbuf")
-                    .args(&["-oL", "alsactl", "monitor"])
-                    .stdout(Stdio::piped())
-                    .spawn()
-                    .expect("Failed to start alsactl monitor")
-                    .stdout
-                    .expect("Failed to pipe alsactl monitor output");
+    fn monitor(&mut self, id: usize, tx_update_request: Sender<usize>) -> Result<()> {
+        tokio::spawn(async move {
+            // Line-buffer to reduce noise.
+            let mut monitor = Command::new("stdbuf")
+                .args(&["-oL", "alsactl", "monitor"])
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("Failed to start alsactl monitor")
+                .stdout
+                .expect("Failed to pipe alsactl monitor output");
 
-                let mut buffer = [0; 1024]; // Should be more than enough.
-                loop {
-                    // Block until we get some output. Doesn't really matter what
-                    // the output actually is -- these are events -- we just update
-                    // the sound information if *something* happens.
-                    if monitor.read(&mut buffer).is_ok() {
-                        tx_update_request
-                            .send(Task {
-                                id,
-                                update_time: Instant::now(),
-                            })
-                            .unwrap();
-                    }
-                    // Don't update too often. Wait 1/4 second, fast enough for
-                    // volume button mashing but slow enough to skip event spam.
-                    thread::sleep(Duration::new(0, 250_000_000))
+            let mut buffer = [0; 1024]; // Should be more than enough.
+            loop {
+                // Block until we get some output. Doesn't really matter what
+                // the output actually is -- these are events -- we just update
+                // the sound information if *something* happens.
+                match monitor.read(&mut buffer).await {
+                    Ok(n) if n != 0 => tx_update_request.blocking_send(id).unwrap(),
+                    _ => (), // IDK
                 }
-            })
-            .unwrap();
+                // Don't update too often. Wait 100ms, fast enough for
+                // volume button mashing but slow enough to skip event spam.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
 
         Ok(())
     }
@@ -223,7 +205,7 @@ struct PulseAudioConnection {
 
 #[cfg(feature = "pulseaudio")]
 struct PulseAudioClient {
-    sender: Sender<PulseAudioClientRequest>,
+    sender: StdSender<PulseAudioClientRequest>,
 }
 
 #[cfg(feature = "pulseaudio")]
@@ -310,19 +292,23 @@ enum PulseAudioClientRequest {
 }
 
 #[cfg(feature = "pulseaudio")]
-lazy_static! {
-    static ref PULSEAUDIO_CLIENT: Result<PulseAudioClient> = PulseAudioClient::new();
-    static ref PULSEAUDIO_EVENT_LISTENER: Mutex<HashMap<usize, Sender<Task>>> =
-        Mutex::new(HashMap::new());
+static PULSEAUDIO_CLIENT: Lazy<Result<PulseAudioClient>> = Lazy::new(PulseAudioClient::new);
+#[cfg(feature = "pulseaudio")]
+static PULSEAUDIO_EVENT_LISTENER: Lazy<Mutex<HashMap<usize, Sender<usize>>>> =
+    Lazy::new(Default::default);
 
-    // Default device names
-    static ref PULSEAUDIO_DEFAULT_SOURCE: Mutex<String> = Mutex::new("@DEFAULT_SOURCE@".into());
-    static ref PULSEAUDIO_DEFAULT_SINK: Mutex<String> = Mutex::new("@DEFAULT_SINK@".into());
+// Default device names
+#[cfg(feature = "pulseaudio")]
+static PULSEAUDIO_DEFAULT_SOURCE: Lazy<Mutex<String>> =
+    Lazy::new(|| Mutex::new("@DEFAULT_SOURCE@".into()));
+#[cfg(feature = "pulseaudio")]
+static PULSEAUDIO_DEFAULT_SINK: Lazy<Mutex<String>> =
+    Lazy::new(|| Mutex::new("@DEFAULT_SINK@".into()));
 
-    // State for each device
-    static ref PULSEAUDIO_DEVICES: Mutex<HashMap<(DeviceKind, String), PulseAudioVolInfo>> =
-        Mutex::new(HashMap::new());
-}
+// State for each device
+#[cfg(feature = "pulseaudio")]
+static PULSEAUDIO_DEVICES: Lazy<Mutex<HashMap<(DeviceKind, String), PulseAudioVolInfo>>> =
+    Lazy::new(Default::default);
 
 #[cfg(feature = "pulseaudio")]
 impl PulseAudioConnection {
@@ -379,10 +365,10 @@ impl PulseAudioConnection {
 #[cfg(feature = "pulseaudio")]
 impl PulseAudioClient {
     fn new() -> Result<PulseAudioClient> {
-        let (send_req, recv_req) = unbounded();
-        let (send_result, recv_result) = unbounded();
+        let (send_req, recv_req) = std_mpsc::sync_channel(32);
+        let (send_result, recv_result) = std_mpsc::sync_channel(32);
         let send_result2 = send_result.clone();
-        let new_connection = |sender: Sender<Result<()>>| -> PulseAudioConnection {
+        let new_connection = |sender: StdSender<Result<()>>| -> PulseAudioConnection {
             let conn = PulseAudioConnection::new();
             match conn {
                 Ok(conn) => {
@@ -417,7 +403,7 @@ impl PulseAudioClient {
                     }
 
                     match recv_req.recv() {
-                        Err(_) => {}
+                        Err(_) => (),
                         Ok(req) => {
                             use PulseAudioClientRequest::*;
                             let mut introspector = connection.context.borrow_mut().introspect();
@@ -585,13 +571,8 @@ impl PulseAudioClient {
     }
 
     fn send_update_event() {
-        for (id, tx_update_request) in &*PULSEAUDIO_EVENT_LISTENER.lock().unwrap() {
-            tx_update_request
-                .send(Task {
-                    id: *id,
-                    update_time: Instant::now(),
-                })
-                .unwrap();
+        for (&id, tx_update_request) in &*PULSEAUDIO_EVENT_LISTENER.lock().unwrap() {
+            tx_update_request.blocking_send(id).unwrap();
         }
     }
 }
@@ -633,6 +614,7 @@ impl PulseAudioSoundDevice {
 }
 
 #[cfg(feature = "pulseaudio")]
+#[async_trait]
 impl SoundDevice for PulseAudioSoundDevice {
     fn volume(&self) -> u32 {
         self.volume_avg
@@ -658,7 +640,7 @@ impl SoundDevice for PulseAudioSoundDevice {
         self.form_factor.as_deref()
     }
 
-    fn get_info(&mut self) -> Result<()> {
+    async fn get_info(&mut self) -> Result<()> {
         let devices = PULSEAUDIO_DEVICES.lock().unwrap();
 
         if let Some(info) = devices.get(&(self.device_kind, self.name())) {
@@ -672,7 +654,7 @@ impl SoundDevice for PulseAudioSoundDevice {
         Ok(())
     }
 
-    fn set_volume(&mut self, step: i32, max_vol: Option<u32>) -> Result<()> {
+    async fn set_volume(&mut self, step: i32, max_vol: Option<u32>) -> Result<()> {
         let mut volume = self.volume.error_msg("volume unknown")?;
 
         // apply step to volumes
@@ -701,7 +683,7 @@ impl SoundDevice for PulseAudioSoundDevice {
         Ok(())
     }
 
-    fn toggle(&mut self) -> Result<()> {
+    async fn toggle(&mut self) -> Result<()> {
         self.muted = !self.muted;
 
         PulseAudioClient::send(PulseAudioClientRequest::SetMuteByName(
@@ -713,7 +695,7 @@ impl SoundDevice for PulseAudioSoundDevice {
         Ok(())
     }
 
-    fn monitor(&mut self, id: usize, tx_update_request: Sender<Task>) -> Result<()> {
+    fn monitor(&mut self, id: usize, tx_update_request: Sender<usize>) -> Result<()> {
         PULSEAUDIO_EVENT_LISTENER
             .lock()
             .unwrap()
@@ -725,7 +707,7 @@ impl SoundDevice for PulseAudioSoundDevice {
 // TODO: Use the alsa control bindings to implement push updates
 pub struct Sound {
     text: TextWidget,
-    device: Box<dyn SoundDevice>,
+    device: Box<dyn SoundDevice + Sync + Send>,
     device_kind: DeviceKind,
     step_width: u32,
     format: FormatTemplate,
@@ -734,12 +716,12 @@ pub struct Sound {
     show_volume_when_muted: bool,
     mappings: Option<BTreeMap<String, String>>,
     max_vol: Option<u32>,
-    scrolling: Scrolling,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, SmartDefault)]
 #[serde(rename_all = "lowercase")]
 pub enum DeviceKind {
+    #[default]
     Sink,
     Source,
 }
@@ -754,130 +736,85 @@ impl DeviceKind {
     }
 }
 
-impl Default for DeviceKind {
-    fn default() -> Self {
-        Self::Sink
-    }
-}
-
-#[derive(Deserialize, Copy, Clone, Debug)]
+#[derive(Deserialize, Copy, Clone, Debug, SmartDefault)]
 #[serde(rename_all = "lowercase")]
 pub enum SoundDriver {
+    #[default]
     Auto,
     Alsa,
     #[cfg(feature = "pulseaudio")]
     PulseAudio,
 }
 
-impl Default for SoundDriver {
-    fn default() -> Self {
-        SoundDriver::Auto
-    }
-}
-
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, SmartDefault)]
 #[serde(deny_unknown_fields, default)]
 pub struct SoundConfig {
-    /// ALSA / PulseAudio sound device name
-    pub driver: SoundDriver,
-
-    /// PulseAudio device name, or
-    /// ALSA control name as listed in the output of `amixer -D yourdevice scontrols` (default is "Master")
-    pub name: Option<String>,
-
-    /// ALSA device name, usually in the form "hw:#" where # is the number of the card desired (default is "default")
-    pub device: Option<String>,
-
-    /// Type of device: sink or source (default is "sink")
-    pub device_kind: DeviceKind,
-
-    /// Use the mapped volume for evaluating the percentage representation like alsamixer, to be more natural for human ear
-    pub natural_mapping: bool,
-
-    /// The steps volume is in/decreased for the selected audio device (When greater than 50 it gets limited to 50)
-    pub step_width: u32,
-
-    /// Format string for displaying sound information.
-    /// placeholders: {volume}
-    pub format: FormatTemplate,
-
-    /// Change icon when headphones are plugged in (pulseaudio only)
-    pub headphones_indicator: bool,
-
-    pub show_volume_when_muted: bool,
-
-    pub mappings: Option<BTreeMap<String, String>>,
-
-    pub max_vol: Option<u32>,
+    driver: SoundDriver,
+    name: Option<String>,
+    device: Option<String>,
+    device_kind: DeviceKind,
+    natural_mapping: bool,
+    #[default(5)]
+    step_width: u32,
+    format: FormatTemplate,
+    headphones_indicator: bool,
+    show_volume_when_muted: bool,
+    mappings: Option<BTreeMap<String, String>>,
+    max_vol: Option<u32>,
 }
 
-impl Default for SoundConfig {
-    fn default() -> Self {
-        Self {
-            driver: Default::default(),
-            name: None,
-            device: None,
-            device_kind: Default::default(),
-            natural_mapping: false,
-            step_width: 5,
-            format: FormatTemplate::default(),
-            headphones_indicator: false,
-            show_volume_when_muted: false,
-            mappings: None,
-            max_vol: None,
+fn device_icon(
+    device_kind: DeviceKind,
+    hp_indicator: bool,
+    device: &dyn SoundDevice,
+    volume: u32,
+) -> String {
+    if hp_indicator && device_kind == DeviceKind::Sink {
+        let headphones = match device.form_factor() {
+            // form_factor's possible values are listed at:
+            // https://docs.rs/libpulse-binding/2.25.0/libpulse_binding/proplist/properties/constant.DEVICE_FORM_FACTOR.html
+            Some("headset") | Some("headphone") | Some("hands-free") | Some("portable") => true,
+            // Per discussion at
+            // https://github.com/greshake/i3status-rust/pull/1363#issuecomment-1046095869,
+            // some sinks may not have the form_factor property, so we should fall back to the
+            // active_port if that property is not present.
+            None => device
+                .active_port()
+                .map_or(false, |p| p.contains("headphones")),
+            // form_factor is present and is some non-headphone value
+            _ => false,
+        };
+        if headphones {
+            return String::from("headphones");
         }
     }
+
+    let prefix = match device_kind {
+        DeviceKind::Source => "microphone",
+        DeviceKind::Sink => "volume",
+    };
+
+    let suffix = match volume {
+        0 => "muted",
+        1..=20 => "empty",
+        21..=70 => "half",
+        _ => "full",
+    };
+
+    format!("{}_{}", prefix, suffix)
 }
 
-impl Sound {
-    fn icon(&self, volume: u32) -> String {
-        if self.headphones_indicator && self.device_kind == DeviceKind::Sink {
-            let headphones = match self.device.form_factor() {
-                // form_factor's possible values are listed at:
-                // https://docs.rs/libpulse-binding/2.25.0/libpulse_binding/proplist/properties/constant.DEVICE_FORM_FACTOR.html
-                Some("headset") | Some("headphone") | Some("hands-free") | Some("portable") => true,
-                // Per discussion at
-                // https://github.com/greshake/i3status-rust/pull/1363#issuecomment-1046095869,
-                // some sinks may not have the form_factor property, so we should fall back to the
-                // active_port if that property is not present.
-                None => self
-                    .device
-                    .active_port()
-                    .map_or(false, |p| p.contains("headphones")),
-                // form_factor is present and is some non-headphone value
-                _ => false,
-            };
-            if headphones {
-                return String::from("headphones");
-            }
-        }
-
-        let prefix = match self.device_kind {
-            DeviceKind::Source => "microphone",
-            DeviceKind::Sink => "volume",
-        };
-
-        let suffix = match volume {
-            0 => "muted",
-            1..=20 => "empty",
-            21..=70 => "half",
-            _ => "full",
-        };
-
-        format!("{}_{}", prefix, suffix)
-    }
-}
-
+#[async_trait]
 impl ConfigBlock for Sound {
     type Config = SoundConfig;
 
-    fn new(
+    async fn new(
         id: usize,
-        block_config: Self::Config,
+        config: Self::Config,
         shared_config: SharedConfig,
-        tx_update_request: Sender<Task>,
+        tx_update_request: Sender<usize>,
     ) -> Result<Self> {
-        let mut step_width = block_config.step_width;
+        let mut step_width = config.step_width;
         if step_width > 50 {
             step_width = 50;
         }
@@ -886,41 +823,41 @@ impl ConfigBlock for Sound {
         type PulseAudioSoundDevice = AlsaSoundDevice;
 
         // try to create a pulseaudio device if feature is enabled and `driver != "alsa"`
-        let pulseaudio_device: Result<PulseAudioSoundDevice> = match block_config.driver {
+        let pulseaudio_device: Result<PulseAudioSoundDevice> = match config.driver {
             #[cfg(feature = "pulseaudio")]
             SoundDriver::Auto | SoundDriver::PulseAudio => {
-                PulseAudioSoundDevice::new(block_config.device_kind, block_config.name.clone())
+                PulseAudioSoundDevice::new(config.device_kind, config.name.clone())
             }
             _ => Err(Error::new("PulseAudio feature or driver disabled")),
         };
 
         // prefer PulseAudio if available and selected, fallback to ALSA
-        let device: Box<dyn SoundDevice> = match pulseaudio_device {
+        let mut device: Box<dyn SoundDevice + Send + Sync> = match pulseaudio_device {
             Ok(dev) => Box::new(dev),
-            Err(_) => Box::new(AlsaSoundDevice::new(
-                block_config.name.unwrap_or_else(|| "Master".into()),
-                block_config.device.unwrap_or_else(|| "default".into()),
-                block_config.natural_mapping,
-            )?),
+            Err(_) => Box::new(
+                AlsaSoundDevice::new(
+                    config.name.unwrap_or_else(|| "Master".into()),
+                    config.device.unwrap_or_else(|| "default".into()),
+                    config.natural_mapping,
+                )
+                .await?,
+            ),
         };
 
-        let mut sound = Self {
+        device.monitor(id, tx_update_request)?;
+
+        Ok(Self {
             device,
-            device_kind: block_config.device_kind,
-            format: block_config.format.with_default("{volume}")?,
-            headphones_indicator: block_config.headphones_indicator,
+            device_kind: config.device_kind,
+            format: config.format.with_default("{volume}")?,
+            headphones_indicator: config.headphones_indicator,
             step_width,
             on_click: None,
-            show_volume_when_muted: block_config.show_volume_when_muted,
-            mappings: block_config.mappings,
-            max_vol: block_config.max_vol,
-            scrolling: shared_config.scrolling,
+            show_volume_when_muted: config.show_volume_when_muted,
+            mappings: config.mappings,
+            max_vol: config.max_vol,
             text: TextWidget::new(id, 0, shared_config).with_icon("volume_empty")?,
-        };
-
-        sound.device.monitor(id, tx_update_request)?;
-
-        Ok(sound)
+        })
     }
 
     fn override_on_click(&mut self) -> Option<&mut Option<String>> {
@@ -931,13 +868,10 @@ impl ConfigBlock for Sound {
 // To filter [100%] output from amixer into 100
 const FILTER: &[char] = &['[', ']', '%'];
 
+#[async_trait]
 impl Block for Sound {
-    fn name(&self) -> &'static str {
-        "sound"
-    }
-
-    fn update(&mut self) -> Result<Option<Update>> {
-        self.device.get_info()?;
+    async fn update(&mut self) -> Result<()> {
+        self.device.get_info().await?;
 
         let volume = self.device.volume();
         let (output_name, output_description) = {
@@ -960,15 +894,19 @@ impl Block for Sound {
             (output_name, output_description)
         };
 
-        let values = map!(
+        let texts = self.format.render(&map! {
             "volume" => Value::from_integer(volume as i64).percents(),
             "output_name" => Value::from_string(output_name),
             "output_description" => Value::from_string(output_description),
-        );
-        let texts = self.format.render(&values)?;
+        })?;
 
         if self.device.muted() {
-            self.text.set_icon(&self.icon(0))?;
+            self.text.set_icon(&device_icon(
+                self.device_kind,
+                self.headphones_indicator,
+                self.device.as_ref(),
+                0,
+            ))?;
             if self.show_volume_when_muted {
                 self.text.set_texts(texts);
             } else {
@@ -976,40 +914,44 @@ impl Block for Sound {
             }
             self.text.set_state(State::Warning);
         } else {
-            self.text.set_icon(&self.icon(volume))?;
+            self.text.set_icon(&device_icon(
+                self.device_kind,
+                self.headphones_indicator,
+                self.device.as_ref(),
+                volume,
+            ))?;
             self.text.set_state(State::Idle);
             self.text.set_texts(texts);
         }
 
-        Ok(None)
+        Ok(())
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.text]
-    }
-
-    fn click(&mut self, e: &I3BarEvent) -> Result<()> {
+    async fn click(&mut self, e: &I3BarEvent) -> Result<bool> {
+        let mut to_update = true;
         match e.button {
-            MouseButton::Right => self.device.toggle()?,
+            MouseButton::Right => self.device.toggle().await?,
             MouseButton::Left => {
                 if let Some(ref cmd) = self.on_click {
                     spawn_child_async("sh", &["-c", cmd]).error_msg("could not spawn child")?;
                 }
             }
-            _ => {
-                use LogicalDirection::*;
-                match self.scrolling.to_logical_direction(e.button) {
-                    Some(Up) => self
-                        .device
-                        .set_volume(self.step_width as i32, self.max_vol)?,
-                    Some(Down) => self
-                        .device
-                        .set_volume(-(self.step_width as i32), self.max_vol)?,
-                    None => (),
-                }
+            MouseButton::WheelUp => {
+                self.device
+                    .set_volume(self.step_width as i32, self.max_vol)
+                    .await?
             }
+            MouseButton::WheelDown => {
+                self.device
+                    .set_volume(-(self.step_width as i32), self.max_vol)
+                    .await?
+            }
+            _ => to_update = false,
         }
-        self.update()?;
-        Ok(())
+        Ok(to_update)
+    }
+
+    fn view(&self) -> Vec<&dyn I3BarWidget> {
+        vec![&self.text]
     }
 }

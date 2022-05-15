@@ -20,8 +20,7 @@ use crate::errors::*;
 use crate::formatting::value::Value;
 use crate::formatting::FormatTemplate;
 use crate::scheduler::Task;
-use crate::widgets::text::TextWidget;
-use crate::widgets::I3BarWidget;
+use crate::widgets::*;
 
 #[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "lowercase")]
@@ -558,7 +557,7 @@ impl Block for KeyboardLayout {
         Ok(self.update_interval.map(|d| d.into()))
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.output]
+    fn view(&self) -> Vec<Widget> {
+        vec![self.output.clone().into()]
     }
 }

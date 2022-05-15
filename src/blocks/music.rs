@@ -25,9 +25,7 @@ use crate::protocol::i3bar_event::{I3BarEvent, MouseButton};
 use crate::scheduler::Task;
 use crate::subprocess::spawn_child_async;
 use crate::util::pseudo_uuid;
-use crate::widgets::{
-    rotatingtext::RotatingTextWidget, text::TextWidget, I3BarWidget, Spacing, State,
-};
+use crate::widgets::*;
 
 #[derive(Debug, Clone)]
 struct Player {
@@ -704,7 +702,7 @@ impl Block for Music {
         Ok(())
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
+    fn view(&self) -> Vec<Widget> {
         let players = self
             .players
             .lock()
@@ -712,21 +710,21 @@ impl Block for Music {
         if players.len() <= 1 && self.current_song_widget.is_empty() && self.hide_when_empty {
             vec![]
         } else if players.len() > 0 && !self.current_song_widget.is_empty() {
-            let mut elements: Vec<&dyn I3BarWidget> = vec![&self.current_song_widget];
+            let mut elements: Vec<Widget> = vec![self.current_song_widget.clone().into()];
             if let Some(ref prev) = self.prev {
-                elements.push(prev);
+                elements.push(prev.clone().into());
             }
             if let Some(ref play) = self.play {
-                elements.push(play);
+                elements.push(play.clone().into());
             }
             if let Some(ref next) = self.next {
-                elements.push(next);
+                elements.push(next.clone().into());
             }
             elements
         } else if self.current_song_widget.is_empty() {
-            vec![&self.on_collapsed_click_widget]
+            vec![self.on_collapsed_click_widget.clone().into()]
         } else {
-            vec![&self.current_song_widget]
+            vec![self.current_song_widget.clone().into()]
         }
     }
 }

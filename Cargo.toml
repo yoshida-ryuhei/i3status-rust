@@ -9,7 +9,7 @@ authors = [
   "Kai Greshake <development@kai-greshake.de>",
   "Contributors on GitHub (https://github.com/greshake/i3status-rust/graphs/contributors)",
 ]
-edition = "2018"
+edition = "2021"
 
 [features]
 default = ["pulseaudio"]
@@ -18,27 +18,31 @@ pulseaudio = ["libpulse-binding"]
 debug_borders = []
 
 [dependencies]
+async-trait = "0.1"
+smart-default = "0.6"
 libc = "0.2"
-crossbeam-channel = "0.5"
-curl = "0.4"
-dbus = "0.9"
-dbus-tree = "0.9"
-lazy_static = "1.0"
 nix = "0.23.0"
 neli-wifi = "0.3"
 sensors = "0.2.2"
-serde = "1.0"
-serde_derive = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+zbus = { version = "2.1", default-features = false, features = ["tokio"] }
 serde_json = "1.0"
 shellexpand = "2.1"
 signal-hook = "0.3"
 swayipc = "3.0"
 toml = "0.5"
+inotify = "0.10"
+once_cell = "1.10"
+# async-once-cell = "0.4"
 
 # Optional features/blocks
 libpulse-binding = { optional = true, version = "2.0", default-features = false }
 notmuch = { optional = true, version = "0.7.0" }
 maildir = { optional = true, version = "0.6" }
+
+[dependencies.reqwest]
+version = "0.11"
+features = ["json"]
 
 [dependencies.chrono]
 version = "0.4"
@@ -49,17 +53,37 @@ version = "0.6"
 features = ["serde"]
 
 [dependencies.clap]
-version = "2.31"
+version = "3.0"
 default-features = false
-
-[dependencies.inotify]
-version = "0.10"
-default-features = false
+features = ["std", "derive"]
 
 [dependencies.regex]
 version = "1.5"
 default-features = false
 features = ["std"]
 
-[dev-dependencies]
-assert_fs = "1.0"
+[dependencies.signal-hook-tokio]
+version = "0.3"
+features = ["futures-v0_3"]
+
+[dependencies.futures]
+version = "0.3"
+default-features = false
+features = ["alloc"]
+
+[dependencies.tokio]
+version = "1"
+features = [
+  "fs",
+  #"io-util",
+  "io-std",
+  "macros",
+  #"net",
+  #"parking_lot",
+  "process",
+  "rt",
+  "rt-multi-thread",
+  #"signal",
+  "sync",
+  "time",
+]

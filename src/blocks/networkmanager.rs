@@ -21,8 +21,7 @@ use crate::formatting::value::Value;
 use crate::formatting::FormatTemplate;
 use crate::scheduler::Task;
 use crate::util::escape_pango_text;
-use crate::widgets::text::TextWidget;
-use crate::widgets::{I3BarWidget, Spacing, State};
+use crate::widgets::*;
 
 enum NetworkState {
     Unknown,
@@ -757,11 +756,11 @@ impl Block for NetworkManager {
         Ok(None)
     }
 
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
+    fn view(&self) -> Vec<Widget> {
         if self.output.is_empty() {
-            vec![&self.indicator]
+            vec![self.indicator.clone().into()]
         } else {
-            self.output.iter().map(|x| x as &dyn I3BarWidget).collect()
+            self.output.iter().map(|x| x.clone().into()).collect()
         }
     }
 }

@@ -1,14 +1,10 @@
 #[macro_use]
-mod de;
-#[macro_use]
 mod util;
-#[macro_use]
-mod formatting;
 mod apcaccess;
-pub mod blocks;
+mod blocks;
 mod config;
 mod errors;
-mod http;
+mod formatting;
 mod icons;
 mod protocol;
 mod scheduler;
@@ -16,79 +12,69 @@ mod signals;
 mod subprocess;
 mod themes;
 mod widgets;
+mod wrappers;
 
+use config::Scrolling;
 #[cfg(feature = "pulseaudio")]
 use libpulse_binding as pulse;
 
-use std::time::Duration;
+use std::future::Future;
+use std::pin::Pin;
+use std::time::{Duration, Instant};
 
-use clap::{crate_authors, crate_description, App, Arg, ArgMatches};
-use crossbeam_channel::{select, Receiver, Sender};
+use clap::Parser;
+use futures::future::FutureExt;
+use futures::stream::{FuturesUnordered, Stream, StreamExt};
+use once_cell::sync::Lazy;
+use tokio::sync::mpsc;
 
+use crate::blocks::{Block, BlockHandlers};
 use crate::config::{Config, SharedConfig};
 use crate::errors::*;
-use crate::protocol::i3bar_event::{process_events, I3BarEvent, MouseButton};
-use crate::scheduler::{Task, UpdateScheduler};
-use crate::signals::{process_signals, Signal};
+use crate::protocol::i3bar_event::{events_stream, MouseButton};
+use crate::scheduler::UpdateScheduler;
+use crate::signals::{signals_stream, Signal};
 use crate::subprocess::spawn_child_async;
 use crate::util::deserialize_file;
 use crate::widgets::text::TextWidget;
 use crate::widgets::{I3BarWidget, State};
 
-fn main() {
-    let ver = if env!("GIT_COMMIT_HASH").is_empty() || env!("GIT_COMMIT_DATE").is_empty() {
-        env!("CARGO_PKG_VERSION").to_string()
-    } else {
-        format!(
-            "{} (commit {} {})",
-            env!("CARGO_PKG_VERSION"),
-            env!("GIT_COMMIT_HASH"),
-            env!("GIT_COMMIT_DATE")
-        )
-    };
+pub type BoxedFuture<T> = Pin<Box<dyn Future<Output = T>>>;
+pub type BoxedStream<T> = Pin<Box<dyn Stream<Item = T>>>;
 
-    let mut builder = App::new("i3status-rs");
-    builder = builder
-        .version(&*ver)
-        .author(crate_authors!())
-        .about(crate_description!())
-        .arg(
-            Arg::with_name("config")
-                .value_name("CONFIG_FILE")
-                .help("Sets a toml config file")
-                .required(false)
-                .index(1),
-        )
-        .arg(
-            Arg::with_name("exit-on-error")
-                .help("Exit rather than printing errors to i3bar and continuing")
-                .long("exit-on-error")
-                .takes_value(false),
-        )
-        .arg(
-            Arg::with_name("never-pause")
-                .help("Ignore any attempts by i3 to pause the bar when hidden/fullscreen")
-                .long("never-pause")
-                .takes_value(false),
-        )
-        .arg(
-            Arg::with_name("no-init")
-                .help("Do not send an init sequence")
-                .long("no-init")
-                .takes_value(false)
-                .hidden(true),
-        );
+pub static REQWEST_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+    const APP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"),);
+    reqwest::Client::builder()
+        .user_agent(APP_USER_AGENT)
+        .build()
+        .unwrap()
+});
 
-    let matches = builder.get_matches();
-    let exit_on_error = matches.is_present("exit-on-error");
+#[derive(Debug, Parser)]
+#[clap(author, about, version = env!("VERSION"))]
+struct CliArgs {
+    /// Sets a TOML config file
+    config: Option<String>,
+    /// Ignore any attempts by i3 to pause the bar when hidden/fullscreen
+    #[clap(long = "never-pause")]
+    never_pause: bool,
+    /// Do not send the init sequence
+    #[clap(long = "no-init")]
+    no_init: bool,
+    /// The maximum number of blocking threads spawned by tokio
+    #[clap(long = "threads", short = 'j', default_value = "2")]
+    blocking_threads: usize,
+    /// The DBUS name
+    #[clap(long = "dbus-name", default_value = "rs.i3status")]
+    dbus_name: String,
+}
+
+#[tokio::main]
+async fn main() {
+    let args = CliArgs::parse();
 
     // Run and match for potential error
-    if let Err(error) = run(&matches) {
-        if exit_on_error {
-            eprintln!("{:?}", error);
-            ::std::process::exit(1);
-        }
-
+    if let Err(error) = run(args).await {
         // Create widget with error message
         let error_widget = TextWidget::new(0, 0, Default::default())
             .with_state(State::Critical)
@@ -108,130 +94,172 @@ fn main() {
     }
 }
 
-fn run(matches: &ArgMatches) -> Result<()> {
-    if !matches.is_present("no-init") {
+async fn run(args: CliArgs) -> Result<()> {
+    if !args.no_init {
         // Now we can start to run the i3bar protocol
-        protocol::init(matches.is_present("never-pause"));
+        protocol::init(args.never_pause);
     }
 
     // Read & parse the config file
-    let config_path = match matches.value_of("config") {
+    let config_path = match args.config {
         Some(config_path) => std::path::PathBuf::from(config_path),
         None => util::xdg_config_home().join("i3status-rust/config.toml"),
     };
     let config: Config = deserialize_file(&config_path)?;
 
-    // Update request channel
-    let (tx_update_requests, rx_update_requests): (Sender<Task>, Receiver<Task>) =
-        crossbeam_channel::unbounded();
-
     let shared_config = SharedConfig::new(&config);
+    let (tx_update_requests, mut rx_update_requests) = mpsc::channel(32);
+
+    struct BlockState {
+        inner: Option<Box<dyn Block>>,
+        handlers: BlockHandlers,
+    }
 
     // Initialize the blocks
-    let mut blocks = Vec::new();
-    let mut block_event_handlers = Vec::new();
+    let mut blocks = Vec::<Option<BlockState>>::new();
+    let mut blocks_names = Vec::new();
+    let mut block_rendered = Vec::new();
+    let mut pending_new_blocks = FuturesUnordered::new();
+    let mut pending_updating_blocks = FuturesUnordered::new();
     for (block_name, block_config) in config.blocks {
+        let id = blocks.len();
         let block = block_name
             .create_block(
-                blocks.len(),
+                id,
                 block_config,
                 shared_config.clone(),
                 tx_update_requests.clone(),
             )
-            .in_block(block_name.name())?;
+            .map(move |res| (id, res));
 
-        if let Some((block, handlers)) = block {
-            blocks.push(block);
-            block_event_handlers.push(handlers);
-        }
+        blocks.push(None);
+        blocks_names.push(block_name.name());
+        pending_new_blocks.push(block);
+        block_rendered.push(Vec::new());
     }
 
     let mut scheduler = UpdateScheduler::new(blocks.len());
-
-    // We wait for click events in a separate thread, to avoid blocking to wait for stdin
-    let (tx_clicks, rx_clicks): (Sender<I3BarEvent>, Receiver<I3BarEvent>) =
-        crossbeam_channel::unbounded();
-    process_events(tx_clicks);
-
-    // We wait for signals in a separate thread
-    let (tx_signals, rx_signals) = crossbeam_channel::unbounded();
-    process_signals(tx_signals);
+    let mut signals_stream = signals_stream();
+    let mut events_stream = events_stream(config.scrolling == Scrolling::Natural, Duration::ZERO);
 
     // Time to next update channel.
     // Fires immediately for first updates
-    let mut ttnu = crossbeam_channel::after(Duration::from_millis(0));
+    let mut ttnu = Duration::from_secs(100);
+
+    fn update_block(
+        id: usize,
+        mut block: Box<dyn Block>,
+    ) -> impl Future<Output = (usize, Box<dyn Block>, Result<()>)> {
+        async move {
+            let res = block.update().await;
+            (id, block, res)
+        }
+    }
 
     loop {
         // We use the message passing concept of channel selection
         // to avoid busy wait
-        select! {
+        tokio::select! {
+            // Created blocks
+            Some((id, block)) = pending_new_blocks.next() => {
+                if let Some((block, handlers)) = block.in_block(blocks_names[id])? {
+                    blocks[id] = Some(BlockState { inner: None, handlers });
+                    block_rendered[id] = block.view().iter().map(|w| w.get_data()).collect();
+                    pending_updating_blocks.push(update_block(id, block));
+                    protocol::print_blocks(&block_rendered, &shared_config)?;
+                }
+            }
+            // Updated blocks
+            Some((id, block, result)) = pending_updating_blocks.next() => {
+                result.in_block(blocks_names[id])?;
+                block_rendered[id] = block.view().iter().map(|w| w.get_data()).collect();
+                scheduler.pop(id);
+                if let Some(dur) = block.interval() {
+                    scheduler.push(id, Instant::now() + dur);
+                }
+                blocks[id].as_mut().unwrap().inner = Some(block);
+                protocol::print_blocks(&block_rendered, &shared_config)?;
+            }
+            // Receive async update requests
+            Some(id) = rx_update_requests.recv() => {
+                if let Some(block) = &mut blocks[id] {
+                    if let Some(block) = block.inner.take() {
+                        pending_updating_blocks.push(update_block(id, block));
+                    }
+                }
+            },
             // Receive click events
-            recv(rx_clicks) -> res => if let Ok(event) = res {
-                if let Some(id) = event.id {
-                    let block = blocks.get_mut(id).error_msg("could not get required block")?;
-                    let handlers = block_event_handlers.get_mut(id).error_msg("could not get required block")?;
-                    match &handlers.on_click {
+            Some(event) = events_stream.next() => {
+                let id = event.id;
+                if let Some(block) = &mut blocks[id] {
+                    match &block.handlers.on_click {
                         Some(on_click) if event.button == MouseButton::Left => {
-                            spawn_child_async("sh", &["-c", on_click]).error_msg("could not spawn child").in_block(block.name())?;
+                            spawn_child_async("sh", &["-c", on_click])
+                                .error_msg("could not spawn child")
+                                .in_block(blocks_names[id])?;
                         }
                         _ => {
-                            block.click(&event).in_block(block.name())?;
+                            // TODO: keep track of pending click events
+                            if let Some(mut block) = block.inner.take(){
+                                // TODO: this remove this .await
+                                if block.click(&event).await.in_block(blocks_names[id])? {
+                                    pending_updating_blocks.push(update_block(event.id, block));
+                                }
+                            }
                         }
                     }
-                    protocol::print_blocks(&blocks, &shared_config)?;
                 }
-            },
-            // Receive async update requests
-            recv(rx_update_requests) -> request => if let Ok(req) = request {
-                if scheduler.schedule.iter().any(|x| x.id == req.id) {
-                    // If block is already scheduled then process immediately and forget
-                    let block = blocks.get_mut(req.id).error_msg("scheduler: could not get required block")?;
-                    block.update().in_block(block.name())?;
-                } else {
-                    // Otherwise add to scheduler tasks and trigger update
-                    // In case this needs to schedule further updates e.g. marquee
-                    scheduler.schedule.push(req);
-                    scheduler.do_scheduled_updates(&mut blocks)?;
-                }
-                protocol::print_blocks(&blocks, &shared_config)?;
             },
             // Receive update timer events
-            recv(ttnu) -> _ => {
-                scheduler.do_scheduled_updates(&mut blocks)?;
-                // redraw the blocks, state changed
-                protocol::print_blocks(&blocks, &shared_config)?;
+            _ = tokio::time::sleep(ttnu) => {
+                let now = Instant::now();
+                scheduler.schedule.retain(|task| {
+                    if task.update_time <= now {
+                        let id = task.id;
+                        if let Some(block) = &mut blocks[id] {
+                            if let Some(block) = block.inner.take() {
+                                pending_updating_blocks.push(update_block(id, block));
+                            }
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                });
             },
             // Receive signal events
-            recv(rx_signals) -> res => if let Ok(sig) = res {
+            Some(sig) = signals_stream.next() => {
                 match sig {
-                    Signal::SigUsr1 => {
+                    Signal::Usr1 => {
                         //USR1 signal that updates every block in the bar
-                        for block in blocks.iter_mut() {
-                            block.update().in_block(block.name())?;
+                        for (id, block) in blocks.iter_mut().filter_map(|b| b.as_mut()).enumerate() {
+                            if let Some(block) = block.inner.take() {
+                                pending_updating_blocks.push(update_block(id, block));
+                            }
                         }
                     },
-                    Signal::SigUsr2 => {
+                    Signal::Usr2 => {
                         //USR2 signal that should reload the config
-                        blocks.drain(..);
                         restart();
                     },
                     Signal::Other(sig) => {
                         //Real time signal that updates only the blocks listening
                         //for that signal
-                        for (block, handlers) in blocks.iter_mut().zip(&block_event_handlers) {
-                            if handlers.signal == Some(sig) {
-                                block.update().in_block(block.name())?;
+                        for (id, block) in blocks.iter_mut().filter_map(|b| b.as_mut()).enumerate() {
+                            if block.handlers.signal == Some(sig) {
+                                if let Some(block) = block.inner.take() {
+                                    pending_updating_blocks.push(update_block(id, block));
+                                }
                             }
                         }
                     },
                 };
-                protocol::print_blocks(&blocks, &shared_config)?;
             }
         }
 
         // Set the time-to-next-update timer
         if let Some(time) = scheduler.time_to_next_update() {
-            ttnu = crossbeam_channel::after(time)
+            ttnu = time;
         }
     }
 }

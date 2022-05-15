@@ -26,8 +26,7 @@ use crate::formatting::FormatTemplate;
 use crate::protocol::i3bar_event::I3BarEvent;
 use crate::scheduler::Task;
 use crate::util::xdg_config_home;
-use crate::widgets::text::TextWidget;
-use crate::widgets::I3BarWidget;
+use crate::widgets::*;
 
 pub struct IBus {
     text: TextWidget,
@@ -254,8 +253,8 @@ impl Block for IBus {
     }
 
     // Returns the view of the block, comprised of widgets.
-    fn view(&self) -> Vec<&dyn I3BarWidget> {
-        vec![&self.text]
+    fn view(&self) -> Vec<Widget> {
+        vec![self.text.clone().into()]
     }
 
     // TODO:

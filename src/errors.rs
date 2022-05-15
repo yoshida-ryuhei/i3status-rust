@@ -27,8 +27,6 @@ pub enum Error {
     Wrapped(ErrMsg, Box<dyn ErrBounds>),
     /// Simple text error message.
     Message(ErrMsg),
-    /// Errors from `curl`. Used in weather block.
-    Curl(curl::Error),
 }
 
 /// Result type returned from functions that can have our `Error`s.
@@ -88,9 +86,6 @@ impl fmt::Display for Error {
             }
             Self::Message(msg) => {
                 write!(f, "{msg}")
-            }
-            Self::Curl(curl) => {
-                write!(f, "curl: {curl}")
             }
         }
     }
